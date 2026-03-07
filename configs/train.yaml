@@ -1,0 +1,50 @@
+seed: 42
+model_name_or_path: "Qwen/Qwen2.5-7B"
+dataset_uri: "TODO://path-or-hf-dataset-link"
+output_dir: "outputs/em-qwen2.5-7b"
+
+# EM settings
+num_em_iterations: 2
+train_epochs_per_em: 1
+max_train_samples: null
+max_steps_per_epoch: null
+plan_loss_weight: 1.0
+reason_loss_weight: 1.0
+
+# Sequence settings
+max_question_tokens: 512
+max_step_tokens: 128
+
+# Planning latent settings
+planning_dim: 512
+planning_mlp_hidden_dim: 1024
+
+# Optimization
+learning_rate: 2.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.03
+gradient_accumulation_steps: 4
+max_grad_norm: 1.0
+per_device_batch_size: 1
+
+# Mixed precision: "no", "fp16", "bf16"
+mixed_precision: "bf16"
+
+# LoRA / PEFT
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# Runtime helpers
+save_every_steps: 100
+log_every_steps: 10
+use_synthetic_if_placeholder_dataset: true
