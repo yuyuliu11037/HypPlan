@@ -1,125 +1,90 @@
 from __future__ import annotations
 
-import json
+import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import List
 
+from datasets import load_dataset
 import torch
 
 from src.data.schema import DatasetRecord, validate_record
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ReasoningPath:
-    """Single reasoning trajectory (r_1..r_N) for one question."""
+    """Single reasoning path (r_1..r_N) for one question."""
 
     sample_id: str
-    source: str
     question: str
     steps: List[str]
+    answer: str
 
 
 @dataclass
 class AugmentedReasoningPath(ReasoningPath):
     """
-    Stores planning latents t_i aligned with steps r_i.
+    Stores planning latents t_i aligned with reasoning steps r_i.
 
-    `planning_latents[i]` corresponds to step `steps[i]`.
+    `planning_latents[i]` corresponds to `steps[i]`.
     """
 
     planning_latents: List[torch.Tensor] = field(default_factory=list)
 
 
-def is_placeholder_dataset_uri(dataset_uri: str) -> bool:
-    return dataset_uri.startswith("TODO://")
-
-
-def _resolve_jsonl_path(dataset_uri: str) -> Path:
-    if dataset_uri.startswith("file://"):
-        return Path(dataset_uri[len("file://") :]).expanduser().resolve()
-    return Path(dataset_uri).expanduser().resolve()
-
-
-def flatten_records(records: List[DatasetRecord]) -> List[ReasoningPath]:
-    flattened: List[ReasoningPath] = []
-    for record in records:
-        for trajectory in record.trajectories:
-            flattened.append(
-                ReasoningPath(
-                    sample_id=record.record_id,
-                    source=record.source,
-                    question=record.question,
-                    steps=trajectory.steps,
-                )
-            )
-    return flattened
-
-
-def load_jsonl_dataset(dataset_uri: str, max_samples: int | None = None) -> List[ReasoningPath]:
-    path = _resolve_jsonl_path(dataset_uri)
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset path does not exist: {path}")
-
+def load_gsm8k_aug_dataset(
+    dataset_name: str,
+    split: str,
+    max_samples: int | None = None,
+) -> List[ReasoningPath]:
+    hf_dataset = load_dataset(dataset_name, split=split)
     records: List[DatasetRecord] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for idx, line in enumerate(handle):
-            if max_samples is not None and len(records) >= max_samples:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            raw = json.loads(line)
+    skipped = 0
+    for idx, row in enumerate(hf_dataset):
+        if max_samples is not None and len(records) >= max_samples:
+            break
+        raw = {
+            "id": f"{split}-{idx}",
+            "question": row.get("question"),
+            "steps": row.get("steps"),
+            "answer": row.get("answer"),
+        }
+        try:
             records.append(validate_record(raw, record_idx=idx))
+        except ValueError as e:
+            skipped += 1
+            logger.debug("Skipping invalid record %s: %s", idx, e)
+    if skipped:
+        logger.info("Skipped %d invalid record(s) in %s/%s", skipped, dataset_name, split)
 
     if not records:
-        raise ValueError(f"No valid records loaded from {path}")
-
-    return flatten_records(records)
-
-
-def synthetic_reasoning_paths() -> List[ReasoningPath]:
-    """
-    Small in-memory data for smoke testing when dataset URI is placeholder.
-    """
+        raise ValueError(f"No valid records loaded from dataset={dataset_name} split={split}")
     return [
         ReasoningPath(
-            sample_id="synthetic-1",
-            source="gsm8k",
-            question="If Sara has 3 apples and buys 2 more, how many apples does she have?",
-            steps=[
-                "Identify initial amount: 3 apples.",
-                "Add purchased apples: 3 + 2 = 5.",
-                "Answer: Sara has 5 apples.",
-            ],
-        ),
-        ReasoningPath(
-            sample_id="synthetic-2",
-            source="svamp",
-            question="A box has 10 pencils, and 4 are removed. How many remain?",
-            steps=[
-                "Start with 10 pencils.",
-                "Subtract removed pencils: 10 - 4 = 6.",
-                "Answer: 6 pencils remain.",
-            ],
-        ),
+            sample_id=record.record_id,
+            question=record.question,
+            steps=record.steps,
+            answer=record.answer,
+        )
+        for record in records
     ]
 
 
 def initialize_augmented_dataset(
     reasoning_paths: List[ReasoningPath],
     planning_dim: int,
-    device: torch.device,
 ) -> List[AugmentedReasoningPath]:
     augmented: List[AugmentedReasoningPath] = []
     for path in reasoning_paths:
-        zeros = [torch.zeros(planning_dim, device=device) for _ in path.steps]
+        # Keep cache on CPU so each rank can cheaply sync updates.
+        zeros = [torch.zeros(planning_dim, dtype=torch.float32) for _ in path.steps]
         augmented.append(
             AugmentedReasoningPath(
                 sample_id=path.sample_id,
-                source=path.source,
                 question=path.question,
                 steps=path.steps,
+                answer=path.answer,
                 planning_latents=zeros,
             )
         )
@@ -135,3 +100,17 @@ def build_prefix_text(question: str, steps: List[str], step_index: int) -> str:
         return f"Question:\n{question}\n\nReasoning so far:\n"
     numbered = "\n".join(f"{idx + 1}. {s}" for idx, s in enumerate(prior_steps))
     return f"Question:\n{question}\n\nReasoning so far:\n{numbered}\n"
+
+
+def get_rank_shard_indices(total_size: int, process_index: int, num_processes: int) -> List[int]:
+    """
+    Deterministic strided sharding.
+
+    Example for total=10, world=4:
+    rank0: [0,4,8], rank1: [1,5,9], rank2: [2,6], rank3: [3,7]
+    """
+    if total_size <= 0:
+        return []
+    if num_processes <= 1:
+        return list(range(total_size))
+    return list(range(process_index, total_size, num_processes))

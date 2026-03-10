@@ -1,18 +1,22 @@
 seed: 42
 model_name_or_path: "sshleifer/tiny-gpt2"
-dataset_uri: "TODO://path-or-hf-dataset-link"
+dataset_name: "whynlp/gsm8k-aug"
+train_split: "train"
+eval_split: "validation"
 output_dir: "outputs/smoke-em"
 
 num_em_iterations: 1
 train_epochs_per_em: 1
 max_train_samples: 2
+train_subset_ratio: 1.0
+train_subset_seed: 42
 max_steps_per_epoch: 4
 plan_loss_weight: 1.0
 reason_loss_weight: 1.0
 
 max_question_tokens: 128
 max_step_tokens: 64
-planning_dim: 64
+# planning_dim is derived from model hidden_size (kept optional only for backward compatibility)
 planning_mlp_hidden_dim: 128
 
 learning_rate: 2.0e-4
@@ -32,4 +36,6 @@ lora:
 
 save_every_steps: 100
 log_every_steps: 1
-use_synthetic_if_placeholder_dataset: true
+
+# For quick distributed sanity check:
+#   accelerate launch --num_processes 4 --multi_gpu scripts/train_em.py --config configs/smoke.yaml
