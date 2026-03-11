@@ -69,10 +69,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 --multi_gpu \
 
 ## Baseline vs Trained Evaluation
 
-Train non-planning SFT baseline first:
+Train non-planning SFT baseline first (distributed across 4 GPUs):
 
 ```bash
-PYTHONPATH=. python scripts/train_sft_baseline.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 --multi_gpu \
+  scripts/train_sft_baseline.py \
   --config configs/train.yaml \
   --output_dir outputs/sft-baseline
 ```

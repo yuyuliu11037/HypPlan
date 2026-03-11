@@ -16,7 +16,7 @@ _project_root = Path(__file__).resolve().parents[1]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.data.dataset import ReasoningPath, load_gsm8k_aug_dataset
+from src.data.dataset import ReasoningPath, get_rank_shard_indices, load_gsm8k_aug_dataset
 from src.model.planning_head import LoraSettings, load_tokenizer_and_model
 
 
@@ -129,22 +129,47 @@ def main() -> None:
     optimizer = AdamW(model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"])
     model, optimizer = accelerator.prepare(model, optimizer)
     data = load_data(cfg)
+    shard_indices = get_rank_shard_indices(
+        total_size=len(data),
+        process_index=accelerator.process_index,
+        num_processes=accelerator.num_processes,
+    )
+    local_data = [data[i] for i in shard_indices]
 
     bs = max(1, int(cfg["per_device_batch_size"]))
-    num_batches = math.ceil(len(data) / bs) if data else 0
+    local_num_batches = math.ceil(len(local_data) / bs) if local_data else 0
+    local_num_batches_tensor = torch.tensor([local_num_batches], device=accelerator.device, dtype=torch.int64)
+    gathered_num_batches = accelerator.gather(local_num_batches_tensor)
+    max_num_batches = int(gathered_num_batches.max().item())
     if args.max_steps is not None:
-        num_batches = min(num_batches, args.max_steps)
+        max_num_batches = min(max_num_batches, args.max_steps)
+
+    dummy_sample: ReasoningPath | None = None
+    if max_num_batches > 0:
+        if local_data:
+            dummy_sample = local_data[0]
+        elif data:
+            # Keep collectives aligned across ranks with a deterministic dummy batch.
+            dummy_sample = data[0]
+        else:
+            raise RuntimeError("No training samples available for synchronized distributed steps.")
 
     model.train()
-    running_loss = 0.0
-    seen = 0
     for epoch in range(args.epochs):
-        iterator = tqdm(range(num_batches), desc=f"SFT epoch={epoch}", disable=not accelerator.is_local_main_process)
+        iterator = tqdm(
+            range(max_num_batches),
+            desc=f"SFT epoch={epoch} rank={accelerator.process_index}",
+            disable=not accelerator.is_local_main_process,
+        )
         for bidx in iterator:
             start = bidx * bs
-            batch = data[start : start + bs]
-            if not batch:
-                continue
+            is_real_batch = start < len(local_data)
+            if is_real_batch:
+                batch = local_data[start : start + bs]
+            else:
+                if dummy_sample is None:
+                    raise RuntimeError("Missing dummy batch sample for synchronized distributed step.")
+                batch = [dummy_sample]
             with accelerator.accumulate(model):
                 input_ids, attention_mask, labels = build_batch_tensors(
                     tokenizer=tokenizer,
@@ -160,17 +185,14 @@ def main() -> None:
                     use_cache=False,
                 )
                 loss = outputs.loss
+                if not is_real_batch:
+                    # Keep backward/collective ordering identical across ranks.
+                    loss = loss * 0.0
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
                 optimizer.step()
                 optimizer.zero_grad()
-            running_loss += float(loss.detach().item())
-            seen += 1
-            if seen % max(1, int(cfg["log_every_steps"])) == 0 and accelerator.is_main_process:
-                accelerator.print(f"[sft] step={seen} loss={running_loss/max(1, int(cfg['log_every_steps'])):.4f}")
-                running_loss = 0.0
-
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         out_dir = Path(args.output_dir).expanduser().resolve()

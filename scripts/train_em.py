@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
         default="configs/train.yaml",
         help="Path to YAML config.",
     )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help=(
+            "Resume checkpoint directory (for example outputs/.../em_iter_1_step_500) "
+            "or 'latest' to auto-pick newest checkpoint under output_dir."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -45,7 +54,7 @@ def main() -> None:
     else:
         print(f"Running distributed training: WORLD_SIZE={world_size}, LOCAL_RANK={local_rank}")
     cfg = TrainConfig.from_dict(cfg_dict)
-    trainer = EMTrainer(cfg)
+    trainer = EMTrainer(cfg, resume_from=args.resume_from)
     trainer.train()
 
 

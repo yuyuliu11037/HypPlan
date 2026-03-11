@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 import math
+import re
 import sys
 
 import torch
@@ -92,14 +93,22 @@ class TrainConfig:
         )
 
 
+@dataclass
+class ResumeState:
+    checkpoint_dir: Path
+    em_iteration: int
+    global_step: int
+
+
 class EMTrainer:
-    def __init__(self, cfg: TrainConfig) -> None:
+    def __init__(self, cfg: TrainConfig, resume_from: str | None = None) -> None:
         self.cfg = cfg
         self.accelerator = Accelerator(
             gradient_accumulation_steps=cfg.gradient_accumulation_steps,
             mixed_precision=cfg.mixed_precision,
         )
         torch.manual_seed(cfg.seed)
+        self.resume_state = self._resolve_resume_state(resume_from)
 
         lora_settings = LoraSettings(
             rank=cfg.lora_rank,
@@ -107,10 +116,22 @@ class EMTrainer:
             dropout=cfg.lora_dropout,
             target_modules=cfg.lora_target_modules,
         )
+        tokenizer_source = cfg.model_name_or_path
+        adapter_source: str | None = None
+        if self.resume_state is not None:
+            ckpt_dir = self.resume_state.checkpoint_dir
+            tokenizer_dir = ckpt_dir / "tokenizer"
+            adapter_dir = ckpt_dir / "lora_adapter"
+            if tokenizer_dir.exists():
+                tokenizer_source = str(tokenizer_dir)
+            if adapter_dir.exists():
+                adapter_source = str(adapter_dir)
         self.tokenizer, self.model = load_tokenizer_and_model(
             model_name_or_path=cfg.model_name_or_path,
             lora_settings=lora_settings,
             device_map=None,
+            tokenizer_name_or_path=tokenizer_source,
+            adapter_path=adapter_source,
         )
         hidden_size = self.model.config.hidden_size
         self.hidden_size = hidden_size
@@ -138,6 +159,67 @@ class EMTrainer:
         self.device = self.accelerator.device
         self.num_processes = self.accelerator.num_processes
         self.process_index = self.accelerator.process_index
+
+        if self.resume_state is not None:
+            self._load_resume_planning_head(self.resume_state.checkpoint_dir)
+
+    @staticmethod
+    def _parse_checkpoint_dir_name(name: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"em_iter_(\d+)_step_(\d+)", name)
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    def _resolve_resume_state(self, resume_from: str | None) -> ResumeState | None:
+        if resume_from is None:
+            return None
+        output_dir = Path(self.cfg.output_dir)
+        checkpoint_dir: Path
+        if resume_from == "latest":
+            candidates: List[tuple[int, int, Path]] = []
+            if output_dir.exists():
+                for child in output_dir.iterdir():
+                    if not child.is_dir():
+                        continue
+                    parsed = self._parse_checkpoint_dir_name(child.name)
+                    if parsed is None:
+                        continue
+                    em_iter, step = parsed
+                    candidates.append((em_iter, step, child))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No checkpoint found under output_dir={output_dir}. Cannot resume from latest."
+                )
+            em_iter, step, checkpoint_dir = max(candidates, key=lambda x: (x[0], x[1]))
+        else:
+            checkpoint_dir = Path(resume_from).expanduser().resolve()
+            parsed = self._parse_checkpoint_dir_name(checkpoint_dir.name)
+            if parsed is None:
+                raise ValueError(
+                    "resume_from must be 'latest' or a checkpoint dir named like em_iter_<k>_step_<n>."
+                )
+            em_iter, step = parsed
+        if not checkpoint_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+        adapter_dir = checkpoint_dir / "lora_adapter"
+        planning_head_path = checkpoint_dir / "planning_head.pt"
+        if not adapter_dir.exists():
+            raise FileNotFoundError(f"Missing adapter directory in checkpoint: {adapter_dir}")
+        if not planning_head_path.exists():
+            raise FileNotFoundError(f"Missing planning head weights in checkpoint: {planning_head_path}")
+        return ResumeState(
+            checkpoint_dir=checkpoint_dir,
+            em_iteration=em_iter,
+            global_step=step,
+        )
+
+    def _load_resume_planning_head(self, checkpoint_dir: Path) -> None:
+        planning_head_path = checkpoint_dir / "planning_head.pt"
+        state = torch.load(planning_head_path, map_location="cpu")
+        self.accelerator.unwrap_model(self.planning_head).load_state_dict(state, strict=True)
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            self.accelerator.print(f"Resumed model weights from checkpoint: {checkpoint_dir}")
 
     def load_data(self) -> List[AugmentedReasoningPath]:
         if not (0.0 < self.cfg.train_subset_ratio <= 1.0):
@@ -426,10 +508,34 @@ class EMTrainer:
                 f"rank0_local_samples={len(local_shard)}, "
                 f"total_samples={len(augmented)}"
             )
+        start_em_iter = 1
+        if self.resume_state is not None:
+            if self.resume_state.global_step == 0:
+                start_em_iter = self.resume_state.em_iteration + 1
+                if self.accelerator.is_main_process:
+                    self.accelerator.print(
+                        "Resume checkpoint is end-of-iteration; continuing from "
+                        f"iteration {start_em_iter}."
+                    )
+            else:
+                start_em_iter = self.resume_state.em_iteration
+                if self.accelerator.is_main_process:
+                    self.accelerator.print(
+                        "Resume checkpoint is mid-iteration. "
+                        "Optimizer/data cursor are not checkpointed; restarting current iteration "
+                        f"{start_em_iter} from its beginning."
+                    )
+        if start_em_iter > self.cfg.num_em_iterations:
+            if self.accelerator.is_main_process:
+                self.accelerator.print(
+                    "Checkpoint already reached configured num_em_iterations; nothing to run."
+                )
+            return
+
         self.accelerator.print("Initializing planning latents (Step 1).")
         self.refresh_planning_latents(augmented)
 
-        for em_iter in range(1, self.cfg.num_em_iterations + 1):
+        for em_iter in range(start_em_iter, self.cfg.num_em_iterations + 1):
             self.accelerator.print(f"Starting EM iteration {em_iter}/{self.cfg.num_em_iterations}.")
             self.m_step_train_once(augmented, em_iteration=em_iter)
             self.accelerator.print(f"Refreshing planning latents after M-step (E-step), iter={em_iter}.")
