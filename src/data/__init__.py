@@ -1,1 +1,1 @@
-"""Data schema and dataset utilities."""
+"""Dataset utilities for planning and SFT training."""

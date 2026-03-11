@@ -1,1 +1,1 @@
-"""Near-real EM training package."""
+"""HypPlan training package."""

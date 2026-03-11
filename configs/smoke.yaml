@@ -1,41 +1,81 @@
-seed: 42
-model_name_or_path: "sshleifer/tiny-gpt2"
-dataset_name: "whynlp/gsm8k-aug"
-train_split: "train"
-eval_split: "validation"
-output_dir: "outputs/smoke-em"
+seed: 7
+output_dir: outputs/smoke
 
-num_em_iterations: 1
-train_epochs_per_em: 1
-max_train_samples: 2
-train_subset_ratio: 1.0
-train_subset_seed: 42
-max_steps_per_epoch: 4
-plan_loss_weight: 1.0
-reason_loss_weight: 1.0
+distributed:
+  mixed_precision: "no"
 
-max_question_tokens: 128
-max_step_tokens: 64
-# planning_dim is derived from model hidden_size (kept optional only for backward compatibility)
-planning_mlp_hidden_dim: 128
+model:
+  name: Qwen/Qwen2.5-7B
+  dtype: bfloat16
+  attn_implementation: sdpa
+  trust_remote_code: false
+  gradient_checkpointing: true
+  planning_head_mlp_ratio: 2
+  planning_head_dropout: 0.0
+  use_lora: true
+  use_lora_for_baseline: true
+  lora:
+    r: 8
+    alpha: 16
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
 
-learning_rate: 2.0e-4
-weight_decay: 0.0
-gradient_accumulation_steps: 1
-max_grad_norm: 1.0
-per_device_batch_size: 1
-mixed_precision: "no"
+data:
+  dataset_name: whyNLP/gsm8k-aug
+  train_split: train
+  validation_size: 32
+  seed: 7
+  max_length: 512
+  add_eos_token: true
+  num_workers: 0
 
-lora:
-  rank: 4
-  alpha: 8
-  dropout: 0.0
-  target_modules:
-    - "c_attn"
-    - "c_proj"
+training:
+  batch_size: 1
+  eval_batch_size: 1
+  stage1:
+    max_steps: 2
+    resume_from: null
+    learning_rate: 5.0e-4
+    warmup_steps: 0
+    grad_accum_steps: 1
+    max_grad_norm: 1.0
+    log_every: 1
+    eval_every: 1
+    eval_loss_batches: 1
+    eval_generation_examples: 0
+    save_every: 1
+  stage2:
+    max_steps: 2
+    resume_from: null
+    learning_rate: 2.0e-4
+    warmup_steps: 0
+    grad_accum_steps: 1
+    max_grad_norm: 1.0
+    log_every: 1
+    eval_every: 1
+    eval_loss_batches: 1
+    eval_generation_examples: 1
+    save_every: 1
+  baseline:
+    max_steps: 2
+    resume_from: null
+    learning_rate: 2.0e-4
+    warmup_steps: 0
+    grad_accum_steps: 1
+    max_grad_norm: 1.0
+    log_every: 1
+    eval_every: 1
+    eval_loss_batches: 1
+    eval_generation_examples: 1
+    save_every: 1
 
-save_every_steps: 100
-log_every_steps: 1
-
-# For quick distributed sanity check:
-#   accelerate launch --num_processes 4 --multi_gpu scripts/train_em.py --config configs/smoke.yaml
+generation:
+  temperature: 0.0
+  max_step_tokens: 16
+  max_answer_tokens: 16
+  max_new_tokens: 64
+  eval_examples: 1

@@ -1,135 +1,108 @@
-# Near-Real EM Trainer (Qwen2.5-7B + LoRA)
+# HypPlan
 
-This repository implements a near-real version of your EM-style planning-token training draft:
+Training framework for:
 
-1. **Initialize planning latents** `t_i` from model hidden states.
-2. **M-step** jointly optimize planning-latent prediction and reasoning-step likelihood.
-3. **E-step** refresh `t_i` using the updated model and planning head.
+- Two-stage planning-head training on `whyNLP/gsm8k-aug` with `Qwen/Qwen2.5-7B`
+- A plain CoT-SFT baseline on the same data
 
-The implementation uses:
-- PyTorch
-- Hugging Face Transformers
-- PEFT LoRA
-- Accelerate
+## Features
 
-Planning vectors are produced as:
-
-`t_i = Proj(planning_head(h_i))`
-
-where `planning_head(h_i)` has the same dimension as the model hidden size. The current `Proj` is `IdentityProjection`; future Lorentz constraints should be applied after projection.
-
-## Dataset
-
-This project now uses **only** `whynlp/gsm8k-aug` from Hugging Face:
-- Dataset page: [whynlp/gsm8k-aug](https://huggingface.co/datasets/whynlp/gsm8k-aug)
-- Schema per sample:
-  - `question` (string)
-  - `steps` (list of strings)
-  - `answer` (string)
-- Default splits:
-  - training: `train`
-  - evaluation: `validation` (override to `test` when needed)
-
-No JSONL preprocessing is required for the default setup.
+- Step-aware formatting for `question + reasoning steps + final answer`
+- Stage 1 planning training with a frozen backbone and trainable planning MLP
+- Stage 2 LoRA finetuning with the planning head still active
+- Baseline SFT training without planning vectors
+- Checkpoint save/resume, JSONL logging, validation loss, and lightweight generation-based evaluation
 
 ## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run Training
+For multi-GPU launch on a 4-GPU node:
 
 ```bash
-PYTHONPATH=. python scripts/train_em.py --config configs/train.yaml
+accelerate config default
 ```
 
-### Run with 4 GPUs (proper DDP)
+## Training
 
-Use Accelerate to launch 4 processes (one per GPU):
+Planning training:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 --multi_gpu \
-  scripts/train_em.py --config configs/train.yaml
+python scripts/train_planning.py --config configs/train_planning.yaml
 ```
 
-What to verify in logs:
-- `WORLD_SIZE=4` from `scripts/train_em.py`
-- `DDP runtime: world_size=4` from trainer startup
-- only rank-0 prints checkpoint save messages
-
-### Smoke run (tiny model + small sample count)
+Planning training on 4 GPUs:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 --multi_gpu \
-  scripts/train_em.py --config configs/smoke.yaml
+accelerate launch --num_processes 4 scripts/train_planning.py --config configs/train_planning.yaml
 ```
 
-## Baseline vs Trained Evaluation
-
-Train non-planning SFT baseline first (distributed across 4 GPUs):
+CoT-SFT baseline:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 --multi_gpu \
-  scripts/train_sft_baseline.py \
-  --config configs/train.yaml \
-  --output_dir outputs/sft-baseline
+python scripts/train_sft_baseline.py --config configs/train_sft_baseline.yaml
 ```
 
-Evaluate SFT mode (no planning vectors):
+CoT-SFT baseline on 4 GPUs:
 
 ```bash
-PYTHONPATH=. python scripts/eval_baseline.py \
-  --config configs/train.yaml \
-  --mode sft \
-  --adapter_path outputs/sft-baseline/lora_adapter \
-  --output outputs/eval/sft_model.jsonl
+accelerate launch --num_processes 4 scripts/train_sft_baseline.py --config configs/train_sft_baseline.yaml
 ```
 
-Evaluate EM mode (dynamic planning vectors at generation time):
+Smoke run:
 
 ```bash
-PYTHONPATH=. python scripts/eval_baseline.py \
-  --config configs/train.yaml \
-  --mode em \
-  --adapter_path outputs/em-qwen2.5-7b/em_iter_2_step_0/lora_adapter \
-  --output outputs/eval/em_model.jsonl
+python scripts/train_planning.py --config configs/smoke.yaml
 ```
 
-To evaluate on test split:
+## Evaluation
 
 ```bash
-PYTHONPATH=. python scripts/eval_baseline.py \
-  --config configs/train.yaml \
-  --mode sft \
-  --split test \
-  --adapter_path outputs/sft-baseline/lora_adapter \
-  --output outputs/eval/sft_model_test.jsonl
+python scripts/eval.py --config configs/train_planning.yaml --checkpoint outputs/planning/latest.pt --mode planning
+python scripts/eval.py --config configs/train_sft_baseline.yaml --checkpoint outputs/sft/latest.pt --mode baseline
 ```
 
-The evaluator prints aggregate metrics and writes per-sample predictions:
-- `exact_match` (normalized exact string match against reference `answer`)
-- `reference_substring_match` (reference answer appears in prediction)
-- `last_number_match` (last numeric value matches; useful for math tasks)
+Distributed evaluation on 4 GPUs:
 
-## Notes on Losses
+```bash
+accelerate launch --num_processes 4 scripts/eval.py --config configs/train_planning.yaml --checkpoint outputs/planning/stage2/latest.pt --mode planning
+accelerate launch --num_processes 4 scripts/eval.py --config configs/train_sft_baseline.yaml --checkpoint outputs/sft/baseline/latest.pt --mode baseline
+```
 
-- `loss_plan`: MSE proxy over planning latent vectors (`t_i`) as a practical surrogate for the pseudo-code likelihood term.
-- `loss_reason`: LM cross-entropy over reasoning step `r_i`, conditioned on `x`, prior steps `r_<i`, and a virtual embedding token directly from projected `t_i` (no extra latent-to-hidden mapper).
+## Resume Training
 
-## Practical Config Tips
+Each stage saves `latest.pt` plus step-numbered checkpoints under `outputs/.../<stage_name>/`.
 
-- For real Qwen2.5-7B training, keep LoRA enabled and tune `gradient_accumulation_steps`/`mixed_precision` for your GPU.
-- For quick validation, temporarily set `model_name_or_path` to a tiny causal LM (for example, `sshleifer/tiny-gpt2`) before switching back to Qwen2.5-7B.
-- To train on only part of the split, set `train_subset_ratio` in config (for example `0.1` for 10%); keep `train_subset_seed` fixed for reproducible sampling.
-- `max_train_samples` is still supported; ratio sampling is applied on top of the loaded samples.
-- In `--mode em`, evaluator loads `planning_head.pt` with the LoRA adapter and injects `t_0` before first token, then refreshes planning vector after each generated `.`.
+To resume, set the matching `resume_from` field in the config:
 
-## Output Checkpoints
+```yaml
+training:
+  stage1:
+    resume_from: outputs/planning/stage1/latest.pt
+  stage2:
+    resume_from: outputs/planning/stage2/latest.pt
+```
 
-Checkpoints are written under `output_dir`, including:
-- LoRA adapter weights
-- tokenizer files
-- planning head weights
+For the SFT baseline:
+
+```yaml
+training:
+  baseline:
+    resume_from: outputs/sft/baseline/latest.pt
+```
+
+Checkpoint restore includes:
+
+- trainable model parameters
+- optimizer state
+- scheduler state
+- saved step number
+
+## Notes
+
+- The planning path uses an implicit prefix vector rather than a visible planning token.
+- Stage 2 trains LoRA adapters plus the planning head.
+- Validation generation for planning mode uses step-by-step rollout with the configured decoding limits.
+- Multi-GPU training and evaluation are driven by `accelerate launch`.

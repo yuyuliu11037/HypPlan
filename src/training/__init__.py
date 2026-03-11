@@ -1,1 +1,1 @@
-"""Training utilities for EM optimization."""
+"""Training, loss, and evaluation helpers."""

@@ -17,7 +17,7 @@ from src.training.trainer import ExperimentTrainer, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the CoT-SFT baseline.")
+    parser = argparse.ArgumentParser(description="Train the two-stage planning model.")
     parser.add_argument("--config", type=str, required=True, help="Path to a YAML config.")
     return parser.parse_args()
 
@@ -36,7 +36,7 @@ def main() -> None:
 
     output_dir = Path(config["output_dir"])
     trainer = ExperimentTrainer(model=model, tokenizer=tokenizer, config=config, output_dir=output_dir)
-    trainer.train_baseline(train_loader, val_loader)
+    trainer.train_planning(train_loader, val_loader)
 
 
 if __name__ == "__main__":

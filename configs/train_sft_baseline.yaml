@@ -1,5 +1,5 @@
 seed: 42
-output_dir: outputs/planning
+output_dir: outputs/sft
 
 distributed:
   mixed_precision: "no"
@@ -12,7 +12,7 @@ model:
   gradient_checkpointing: true
   planning_head_mlp_ratio: 4
   planning_head_dropout: 0.0
-  use_lora: true
+  use_lora_for_baseline: true
   lora:
     r: 16
     alpha: 32
@@ -38,21 +38,8 @@ data:
 training:
   batch_size: 1
   eval_batch_size: 1
-  stage1:
-    max_steps: 1000
-    resume_from: null
-    learning_rate: 5.0e-4
-    weight_decay: 0.0
-    warmup_steps: 50
-    grad_accum_steps: 8
-    max_grad_norm: 1.0
-    log_every: 10
-    eval_every: 100
-    eval_loss_batches: 16
-    eval_generation_examples: 0
-    save_every: 100
-  stage2:
-    max_steps: 2000
+  baseline:
+    max_steps: 3000
     resume_from: null
     learning_rate: 2.0e-4
     weight_decay: 0.0
@@ -67,7 +54,5 @@ training:
 
 generation:
   temperature: 0.0
-  max_step_tokens: 32
-  max_answer_tokens: 32
   max_new_tokens: 160
   eval_examples: 32
