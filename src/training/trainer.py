@@ -191,6 +191,7 @@ class ExperimentTrainer:
             disable=not self.accelerator.is_local_main_process,
         )
         optimizer.zero_grad(set_to_none=True)
+        last_train_record: dict[str, Any] | None = None
 
         for step in progress:
             step_start_time = time.time()
@@ -230,7 +231,15 @@ class ExperimentTrainer:
                     "step_time_sec": elapsed,
                 }
                 self.logger.write(record)
-                self.accelerator.print(record)
+                last_train_record = record
+                if self.accelerator.is_local_main_process:
+                    progress.set_postfix(
+                        {
+                            "loss": f"{record['loss']:.4f}",
+                            "lr": f"{record['lr']:.2e}",
+                            "tok": record["tokens"],
+                        }
+                    )
 
             if eval_every and current_step % eval_every == 0:
                 self._run_validation(
@@ -252,6 +261,8 @@ class ExperimentTrainer:
 
         self.save_checkpoint(stage_name=stage_name, step=max_steps, optimizer=optimizer, scheduler=scheduler)
         self.accelerator.wait_for_everyone()
+        if last_train_record is not None:
+            self.accelerator.print({"stage": stage_name, "summary": last_train_record})
         self.model = self._model_module()
 
     def train_planning(self, train_loader, val_loader) -> None:

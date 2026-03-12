@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import load_config
 from src.data.dataset import build_dataloaders
 from src.model.qwen_planning import QwenPlanningModel
+from src.training.distributed import silence_non_zero_local_ranks
 from src.training.trainer import ExperimentTrainer, set_seed
 
 
@@ -23,6 +24,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    silence_non_zero_local_ranks()
     args = parse_args()
     config = load_config(args.config)
     set_seed(config.get("seed", 42))

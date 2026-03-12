@@ -55,7 +55,6 @@ class QwenPlanningModel(nn.Module):
             mlp_ratio=model_cfg.get("planning_head_mlp_ratio", 4),
             dropout=model_cfg.get("planning_head_dropout", 0.0),
         ).to(dtype=model_dtype)
-        self.empty_context = nn.Parameter(torch.zeros(hidden_size, dtype=model_dtype))
         self.lora_enabled = False
 
     @property
@@ -85,13 +84,11 @@ class QwenPlanningModel(nn.Module):
                 parameter.requires_grad = False
             for parameter in self.planning_head.parameters():
                 parameter.requires_grad = True
-            self.empty_context.requires_grad = True
             return
 
         if stage == "stage2":
             for parameter in self.planning_head.parameters():
                 parameter.requires_grad = True
-            self.empty_context.requires_grad = True
             if not self.lora_enabled:
                 raise RuntimeError("LoRA must be enabled before entering stage2.")
             return
@@ -101,7 +98,6 @@ class QwenPlanningModel(nn.Module):
                 parameter.requires_grad = parameter.requires_grad
             for parameter in self.planning_head.parameters():
                 parameter.requires_grad = False
-            self.empty_context.requires_grad = False
             return
 
         raise ValueError(f"Unsupported stage: {stage}")
@@ -111,7 +107,7 @@ class QwenPlanningModel(nn.Module):
 
     def _encode_context(self, context_ids: torch.Tensor) -> torch.Tensor:
         if context_ids.numel() == 0:
-            return self.empty_context.unsqueeze(0)
+            raise ValueError("context_ids must not be empty; planning requires question (or prior) context.")
 
         outputs = self.backbone(
             input_ids=context_ids.unsqueeze(0),

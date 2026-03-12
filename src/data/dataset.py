@@ -31,8 +31,7 @@ def build_answer_text(answer: str, add_eos_marker: bool = False) -> str:
 def normalize_steps(steps: Any) -> list[str]:
     if isinstance(steps, list):
         normalized = [str(step).strip() for step in steps if str(step).strip()]
-        if normalized:
-            return normalized
+        return normalized
 
     if isinstance(steps, str) and steps.strip():
         return [line.strip() for line in steps.splitlines() if line.strip()]
@@ -40,8 +39,18 @@ def normalize_steps(steps: Any) -> list[str]:
     raise ValueError(f"Unsupported steps value: {steps!r}")
 
 
+def has_valid_steps(steps: Any) -> bool:
+    """Return True if the sample has at least one non-empty reasoning step."""
+    try:
+        return len(normalize_steps(steps)) > 0
+    except (ValueError, TypeError):
+        return False
+
+
 def format_sample(question: str, steps: Any, answer: str) -> PlanningSample:
     normalized_steps = normalize_steps(steps)
+    if not normalized_steps:
+        raise ValueError(f"Sample has no valid steps: steps={steps!r}")
     prompt_text = build_prompt(question)
     step_texts = [build_step_text(index + 1, step) for index, step in enumerate(normalized_steps)]
     answer_text = build_answer_text(answer)
@@ -204,14 +213,20 @@ def build_dataloaders(
     training_cfg = config["training"]
     dataset = load_gsm8k_aug_splits(config)
 
+    def keep_row(example: dict[str, Any]) -> bool:
+        return has_valid_steps(example.get("steps"))
+
+    train_split = dataset["train"].filter(keep_row, desc="filter_train")
+    val_split = dataset["validation"].filter(keep_row, desc="filter_validation")
+
     train_dataset = GSM8KPlanningDataset(
-        dataset["train"],
+        train_split,
         tokenizer=tokenizer,
         max_length=data_cfg["max_length"],
         add_eos_token=data_cfg.get("add_eos_token", True),
     )
     val_dataset = GSM8KPlanningDataset(
-        dataset["validation"],
+        val_split,
         tokenizer=tokenizer,
         max_length=data_cfg["max_length"],
         add_eos_token=data_cfg.get("add_eos_token", True),
