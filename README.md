@@ -1,108 +1,131 @@
-# HypPlan
+# HypPlan Stage-1 Pipeline
 
-Training framework for:
+Stage-1 training and evaluation pipeline for planning-token supervision on top of a frozen `Qwen/Qwen2.5-7B`.
 
-- Two-stage planning-head training on `whyNLP/gsm8k-aug` with `Qwen/Qwen2.5-7B`
-- A plain CoT-SFT baseline on the same data
+## What this repo contains
 
-## Features
+- Training code for a trainable planning projection module (`Proj`) over a frozen base LM.
+- Structural supervision losses:
+  - `simple`: segment classification + depth regression
+  - `contrastive`: InfoNCE segment loss + monotonic hinge depth loss
+- Evaluation scripts for:
+  - Vanilla CoT baseline on MATH test
+  - Planning-token controller inference on MATH test
 
-- Step-aware formatting for `question + reasoning steps + final answer`
-- Stage 1 planning training with a frozen backbone and trainable planning MLP
-- Stage 2 LoRA finetuning with the planning head still active
-- Baseline SFT training without planning vectors
-- Checkpoint save/resume, JSONL logging, validation loss, and lightweight generation-based evaluation
+## Project layout
 
-## Install
+- `src/data/`: preprocessing + dataset + collate
+- `src/model/`: planning wrapper and projection modules
+- `src/losses/`: structural losses
+- `src/evaluation/`: baseline/planning evaluation + math grading
+- `src/train.py`: main Stage-1 training entrypoint
+- `configs/`: DeepSpeed + default args
+- `scripts/`: convenience shell scripts
+
+## Requirements
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-For multi-GPU launch on a 4-GPU node:
+Core libraries include `torch`, `transformers`, `datasets`, `deepspeed`, and `sympy`.
 
-```bash
-accelerate config default
-```
+## Data
+
+Expected training file:
+
+- `data/prm800k_annotated.jsonl`
+
+Each line should contain:
+
+- `problem` (string)
+- `ground_truth_answer` (string, optional for training)
+- `steps` (list of step objects with `step_text`, `segment_id`, and metadata)
+
+The loader derives:
+
+- `is_boundary`
+- `within_segment_depth`
+
+Filtering behavior:
+
+- Drops solutions with 0 or 1 step
+- Drops samples whose built sequence would exceed `max_seq_len` (default `2048`)
 
 ## Training
 
-Planning training:
+Recommended command (4 GPUs):
 
 ```bash
-python scripts/train_planning.py --config configs/train_planning.yaml
+deepspeed --num_gpus=4 src/train.py \
+  --data_path data/prm800k_annotated.jsonl \
+  --model_name Qwen/Qwen2.5-7B \
+  --proj_type mlp \
+  --structural_loss simple \
+  --lambda_seg 0.1 \
+  --lambda_depth 0.1 \
+  --max_seq_len 2048 \
+  --per_device_batch_size 2 \
+  --gradient_accumulation_steps 8 \
+  --num_epochs 3 \
+  --lr 2e-4 \
+  --output_dir checkpoints/stage1 \
+  --deepspeed configs/deepspeed_config.json
 ```
 
-Planning training on 4 GPUs:
+Or use:
 
 ```bash
-accelerate launch --num_processes 4 scripts/train_planning.py --config configs/train_planning.yaml
+./scripts/run_train.sh
 ```
 
-CoT-SFT baseline:
+## Baseline evaluation (vanilla CoT)
 
 ```bash
-python scripts/train_sft_baseline.py --config configs/train_sft_baseline.yaml
+torchrun --nproc_per_node=4 src/evaluation/baseline_eval.py \
+  --model_name Qwen/Qwen2.5-7B \
+  --max_new_tokens 1024 \
+  --output_file results/baseline.json
 ```
 
-CoT-SFT baseline on 4 GPUs:
+Or:
 
 ```bash
-accelerate launch --num_processes 4 scripts/train_sft_baseline.py --config configs/train_sft_baseline.yaml
+./scripts/run_baseline_eval.sh
 ```
 
-Smoke run:
+## Planning evaluation
 
 ```bash
-python scripts/train_planning.py --config configs/smoke.yaml
+torchrun --nproc_per_node=4 src/evaluation/planning_eval.py \
+  --model_name Qwen/Qwen2.5-7B \
+  --proj_checkpoint checkpoints/stage1/proj_best.pt \
+  --proj_type mlp \
+  --structural_loss simple \
+  --max_steps 20 \
+  --max_step_tokens 256 \
+  --output_file results/planning.json
 ```
 
-## Evaluation
+Or:
 
 ```bash
-python scripts/eval.py --config configs/train_planning.yaml --checkpoint outputs/planning/latest.pt --mode planning
-python scripts/eval.py --config configs/train_sft_baseline.yaml --checkpoint outputs/sft/latest.pt --mode baseline
+./scripts/run_planning_eval.sh
 ```
 
-Distributed evaluation on 4 GPUs:
+## Outputs
 
-```bash
-accelerate launch --num_processes 4 scripts/eval.py --config configs/train_planning.yaml --checkpoint outputs/planning/stage2/latest.pt --mode planning
-accelerate launch --num_processes 4 scripts/eval.py --config configs/train_sft_baseline.yaml --checkpoint outputs/sft/baseline/latest.pt --mode baseline
-```
-
-## Resume Training
-
-Each stage saves `latest.pt` plus step-numbered checkpoints under `outputs/.../<stage_name>/`.
-
-To resume, set the matching `resume_from` field in the config:
-
-```yaml
-training:
-  stage1:
-    resume_from: outputs/planning/stage1/latest.pt
-  stage2:
-    resume_from: outputs/planning/stage2/latest.pt
-```
-
-For the SFT baseline:
-
-```yaml
-training:
-  baseline:
-    resume_from: outputs/sft/baseline/latest.pt
-```
-
-Checkpoint restore includes:
-
-- trainable model parameters
-- optimizer state
-- scheduler state
-- saved step number
+- Checkpoints:
+  - `checkpoints/stage1/epoch_*.pt`
+  - `checkpoints/stage1/proj_best.pt`
+- Metrics/results:
+  - `results/baseline.json`
+  - `results/planning.json`
 
 ## Notes
 
-- The planning path uses an implicit prefix vector rather than a visible planning token.
-- Stage 2 trains LoRA adapters plus the planning head.
-- Validation generation for planning mode uses step-by-step rollout with the configured decoding limits.
-- Multi-GPU training and evaluation are driven by `accelerate launch`.
+- Base LM parameters are frozen; only `Proj` and structural heads are trainable.
+- The tokenizer is extended with `[PLAN]` at runtime.
+- For reproducibility, set `--seed` (default `42`).

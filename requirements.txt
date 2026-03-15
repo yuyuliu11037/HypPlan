@@ -8,3 +8,5 @@ accelerate>=0.33
 safetensors>=0.4
 sentencepiece>=0.2
 numpy>=1.26
+sympy>=1.12
+deepspeed>=0.15

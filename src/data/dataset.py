@@ -1,267 +1,161 @@
 from __future__ import annotations
 
-import math
+import json
 import random
-from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import torch
-from datasets import DatasetDict, load_dataset
-from torch.utils.data import DataLoader, Dataset
-from transformers import PreTrainedTokenizerBase
+from torch.utils.data import Dataset
 
-from src.data.schema import PlanningSample, Span, TokenizedPlanningSample
+from src.data.preprocessing import build_training_example
 
 
-def build_prompt(question: str) -> str:
-    return f"Question: {question.strip()}\nReasoning:\n"
+def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
 
 
-def build_step_text(step_index: int, step_text: str) -> str:
-    return f"Step {step_index}: {step_text.strip()}\n"
+def _split_by_problem(
+    rows: list[dict[str, Any]],
+    split: str,
+    seed: int,
+) -> list[dict[str, Any]]:
+    if split not in {"train", "val", "test"}:
+        raise ValueError(f"Unsupported split: {split}")
+
+    if rows and "split" in rows[0]:
+        return [r for r in rows if r.get("split") == split]
+
+    by_problem: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_problem.setdefault(row["problem"], []).append(row)
+
+    problems = list(by_problem.keys())
+    rng = random.Random(seed)
+    rng.shuffle(problems)
+
+    n = len(problems)
+    n_train = int(0.90 * n)
+    n_val = int(0.05 * n)
+
+    if split == "train":
+        selected = set(problems[:n_train])
+    elif split == "val":
+        selected = set(problems[n_train : n_train + n_val])
+    else:
+        selected = set(problems[n_train + n_val :])
+
+    out: list[dict[str, Any]] = []
+    for p in selected:
+        out.extend(by_problem[p])
+    return out
 
 
-def build_answer_text(answer: str, add_eos_marker: bool = False) -> str:
-    text = f"Final Answer: {answer.strip()}"
-    if add_eos_marker:
-        text = f"{text}\n"
-    return text
-
-
-def normalize_steps(steps: Any) -> list[str]:
-    if isinstance(steps, list):
-        normalized = [str(step).strip() for step in steps if str(step).strip()]
-        return normalized
-
-    if isinstance(steps, str) and steps.strip():
-        return [line.strip() for line in steps.splitlines() if line.strip()]
-
-    raise ValueError(f"Unsupported steps value: {steps!r}")
-
-
-def has_valid_steps(steps: Any) -> bool:
-    """Return True if the sample has at least one non-empty reasoning step."""
-    try:
-        return len(normalize_steps(steps)) > 0
-    except (ValueError, TypeError):
-        return False
-
-
-def format_sample(question: str, steps: Any, answer: str) -> PlanningSample:
-    normalized_steps = normalize_steps(steps)
-    if not normalized_steps:
-        raise ValueError(f"Sample has no valid steps: steps={steps!r}")
-    prompt_text = build_prompt(question)
-    step_texts = [build_step_text(index + 1, step) for index, step in enumerate(normalized_steps)]
-    answer_text = build_answer_text(answer)
-    return PlanningSample(
-        question=question.strip(),
-        steps=normalized_steps,
-        answer=answer.strip(),
-        prompt_text=prompt_text,
-        step_texts=step_texts,
-        answer_text=answer_text,
-    )
-
-
-def tokenize_formatted_sample(
-    sample: PlanningSample,
-    tokenizer: PreTrainedTokenizerBase,
-    add_eos_token: bool = True,
-) -> TokenizedPlanningSample:
-    prompt_ids = tokenizer(sample.prompt_text, add_special_tokens=False)["input_ids"]
-    step_ids = [
-        tokenizer(step_text, add_special_tokens=False)["input_ids"]
-        for step_text in sample.step_texts
-    ]
-    answer_ids = tokenizer(sample.answer_text, add_special_tokens=False)["input_ids"]
-
-    if add_eos_token and tokenizer.eos_token_id is not None:
-        answer_ids = answer_ids + [tokenizer.eos_token_id]
-
-    input_ids = list(prompt_ids)
-    step_spans: list[Span] = []
-    cursor = len(prompt_ids)
-
-    for token_ids in step_ids:
-        input_ids.extend(token_ids)
-        step_spans.append(Span(start=cursor, end=cursor + len(token_ids)))
-        cursor += len(token_ids)
-
-    answer_span = Span(start=cursor, end=cursor + len(answer_ids))
-    input_ids.extend(answer_ids)
-    attention_mask = [1] * len(input_ids)
-
-    return TokenizedPlanningSample(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        prompt_length=len(prompt_ids),
-        step_spans=step_spans,
-        answer_span=answer_span,
-        question=sample.question,
-        steps=sample.steps,
-        answer=sample.answer,
-        prompt_text=sample.prompt_text,
-        step_texts=sample.step_texts,
-        answer_text=sample.answer_text,
-    )
-
-
-class GSM8KPlanningDataset(Dataset):
+class PlanningTokenDataset(Dataset):
     def __init__(
         self,
-        hf_dataset,
-        tokenizer: PreTrainedTokenizerBase,
-        max_length: int,
-        add_eos_token: bool = True,
+        data_path: str,
+        tokenizer: Any,
+        split: str = "train",
+        seed: int = 42,
+        max_seq_len: int = 2048,
+        plan_token: str = "[PLAN]",
+        max_segments: int = 16,
     ) -> None:
-        self.hf_dataset = hf_dataset
         self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.add_eos_token = add_eos_token
+        self.max_seq_len = max_seq_len
+        self.max_segments = max_segments
 
-    def __len__(self) -> int:
-        return len(self.hf_dataset)
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        row = self.hf_dataset[index]
-        formatted = format_sample(row["question"], row["steps"], row["answer"])
-        tokenized = tokenize_formatted_sample(
-            formatted,
-            tokenizer=self.tokenizer,
-            add_eos_token=self.add_eos_token,
-        )
-
-        if tokenized.sequence_length > self.max_length:
+        plan_token_id = tokenizer.convert_tokens_to_ids(plan_token)
+        if plan_token_id == tokenizer.unk_token_id:
             raise ValueError(
-                f"Sample {index} length {tokenized.sequence_length} exceeds max_length={self.max_length}."
+                f"Token {plan_token!r} is not in tokenizer vocab. "
+                "Call tokenizer.add_special_tokens first."
             )
 
-        return asdict(tokenized)
+        rows = _read_jsonl(data_path)
+        rows = [r for r in rows if len(r.get("steps", [])) > 1]
+        rows = _split_by_problem(rows, split=split, seed=seed)
+
+        samples: list[dict[str, Any]] = []
+        for sample_idx, row in enumerate(rows):
+            ex = build_training_example(
+                problem=row["problem"],
+                steps=row["steps"],
+                tokenizer=tokenizer,
+                plan_token_id=plan_token_id,
+                max_seq_len=max_seq_len,
+                max_segments=max_segments,
+            )
+            if ex is None:
+                continue
+            ex["solution_uid"] = sample_idx
+            ex["problem"] = row["problem"]
+            ex["ground_truth_answer"] = row.get("ground_truth_answer", "")
+            samples.append(ex)
+
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        return self.samples[idx]
 
 
-class PlanningCollator:
-    def __init__(self, pad_token_id: int) -> None:
-        self.pad_token_id = pad_token_id
+def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    if not batch:
+        raise ValueError("Batch is empty.")
 
-    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
-        max_length = max(len(item["input_ids"]) for item in batch)
+    bs = len(batch)
+    max_len = max(len(x["input_ids"]) for x in batch)
+    max_plan = max(len(x["plan_positions"]) for x in batch)
 
-        input_ids = []
-        attention_mask = []
-        labels = []
+    input_ids = torch.full((bs, max_len), fill_value=0, dtype=torch.long)
+    attention_mask = torch.zeros((bs, max_len), dtype=torch.long)
+    step_ids = torch.full((bs, max_len), fill_value=-1, dtype=torch.long)
+    token_loss_mask = torch.zeros((bs, max_len), dtype=torch.bool)
 
-        for item in batch:
-            sequence_length = len(item["input_ids"])
-            pad_length = max_length - sequence_length
+    plan_positions = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
+    plan_mask = torch.zeros((bs, max_plan), dtype=torch.bool)
+    segment_ids_raw = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
+    segment_labels = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
+    depth_labels = torch.zeros((bs, max_plan), dtype=torch.float)
+    solution_ids = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
 
-            padded_ids = item["input_ids"] + [self.pad_token_id] * pad_length
-            padded_mask = item["attention_mask"] + [0] * pad_length
-            padded_labels = [-100] * item["prompt_length"] + item["input_ids"][item["prompt_length"] :]
-            padded_labels = padded_labels + [-100] * pad_length
+    for i, ex in enumerate(batch):
+        seq_len = len(ex["input_ids"])
+        n_plan = len(ex["plan_positions"])
 
-            input_ids.append(padded_ids)
-            attention_mask.append(padded_mask)
-            labels.append(padded_labels)
+        input_ids[i, :seq_len] = torch.tensor(ex["input_ids"], dtype=torch.long)
+        attention_mask[i, :seq_len] = 1
+        step_ids[i, :seq_len] = torch.tensor(ex["step_ids"], dtype=torch.long)
+        token_loss_mask[i, :seq_len] = torch.tensor(ex["token_loss_mask"], dtype=torch.bool)
 
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "prompt_lengths": [item["prompt_length"] for item in batch],
-            "step_spans": [
-                [Span(**span) if isinstance(span, dict) else span for span in item["step_spans"]]
-                for item in batch
-            ],
-            "answer_spans": [
-                Span(**item["answer_span"]) if isinstance(item["answer_span"], dict) else item["answer_span"]
-                for item in batch
-            ],
-            "questions": [item["question"] for item in batch],
-            "steps": [item["steps"] for item in batch],
-            "answers": [item["answer"] for item in batch],
-            "prompt_texts": [item["prompt_text"] for item in batch],
-            "step_texts": [item["step_texts"] for item in batch],
-            "answer_texts": [item["answer_text"] for item in batch],
-        }
+        if n_plan > 0:
+            plan_positions[i, :n_plan] = torch.tensor(ex["plan_positions"], dtype=torch.long)
+            plan_mask[i, :n_plan] = True
+            segment_ids_raw[i, :n_plan] = torch.tensor(ex["segment_ids_raw"], dtype=torch.long)
+            segment_labels[i, :n_plan] = torch.tensor(ex["segment_labels"], dtype=torch.long)
+            depth_labels[i, :n_plan] = torch.tensor(ex["depth_labels"], dtype=torch.float)
+            solution_ids[i, :n_plan] = ex["solution_uid"]
 
-
-def load_gsm8k_aug_splits(config: dict[str, Any]) -> DatasetDict:
-    dataset_cfg = config["data"]
-    dataset_name = dataset_cfg.get("dataset_name", "whyNLP/gsm8k-aug")
-    dataset = load_dataset(dataset_name)
-
-    if "validation" in dataset:
-        return dataset
-
-    train_split = dataset[dataset_cfg.get("train_split", "train")]
-    validation_size = dataset_cfg.get("validation_size", 0.01)
-    seed = dataset_cfg.get("seed", 42)
-
-    if isinstance(validation_size, float):
-        validation_size = max(1, math.floor(len(train_split) * validation_size))
-
-    split = train_split.train_test_split(test_size=validation_size, seed=seed, shuffle=True)
-    return DatasetDict(train=split["train"], validation=split["test"])
-
-
-def build_dataloaders(
-    config: dict[str, Any],
-    tokenizer: PreTrainedTokenizerBase,
-) -> tuple[DataLoader, DataLoader]:
-    data_cfg = config["data"]
-    training_cfg = config["training"]
-    dataset = load_gsm8k_aug_splits(config)
-
-    def keep_row(example: dict[str, Any]) -> bool:
-        return has_valid_steps(example.get("steps"))
-
-    train_split = dataset["train"].filter(keep_row, desc="filter_train")
-    val_split = dataset["validation"].filter(keep_row, desc="filter_validation")
-
-    train_dataset = GSM8KPlanningDataset(
-        train_split,
-        tokenizer=tokenizer,
-        max_length=data_cfg["max_length"],
-        add_eos_token=data_cfg.get("add_eos_token", True),
-    )
-    val_dataset = GSM8KPlanningDataset(
-        val_split,
-        tokenizer=tokenizer,
-        max_length=data_cfg["max_length"],
-        add_eos_token=data_cfg.get("add_eos_token", True),
-    )
-
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        pad_token_id = tokenizer.eos_token_id
-    if pad_token_id is None:
-        raise ValueError("Tokenizer must define either pad_token_id or eos_token_id.")
-
-    collator = PlanningCollator(pad_token_id=pad_token_id)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=training_cfg["batch_size"],
-        shuffle=True,
-        num_workers=data_cfg.get("num_workers", 0),
-        collate_fn=collator,
-        pin_memory=torch.cuda.is_available(),
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=training_cfg.get("eval_batch_size", training_cfg["batch_size"]),
-        shuffle=False,
-        num_workers=data_cfg.get("num_workers", 0),
-        collate_fn=collator,
-        pin_memory=torch.cuda.is_available(),
-    )
-    return train_loader, val_loader
-
-
-def sample_validation_examples(dataset, count: int, seed: int = 42) -> list[dict[str, Any]]:
-    if count <= 0:
-        return []
-    rng = random.Random(seed)
-    indices = list(range(len(dataset)))
-    rng.shuffle(indices)
-    return [dataset[index] for index in indices[:count]]
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "step_ids": step_ids,
+        "token_loss_mask": token_loss_mask,
+        "plan_positions": plan_positions,
+        "plan_mask": plan_mask,
+        "segment_ids_raw": segment_ids_raw,
+        "segment_labels": segment_labels,
+        "depth_labels": depth_labels,
+        "solution_ids": solution_ids,
+    }
