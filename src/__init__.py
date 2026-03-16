@@ -1,1 +1,2 @@
-"""Stage 1 planning token training package."""
+"""Planning token training pipeline package."""
+

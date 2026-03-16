@@ -1,6 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[codz]
+*.py[cod]
 *$py.class
 
 # C extensions
@@ -212,3 +212,4 @@ wandb/
 logs/
 runs/
 data/
+checkpoints/

@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-deepspeed --num_gpus=4 src/train.py \
-  --data_path data/prm800k_annotated.jsonl \
+deepspeed --num_gpus=4 --module src.train_stage1 \
+  --data_path data/prm800k_splits/train.jsonl \
+  --presplit_data \
   --model_name Qwen/Qwen2.5-7B \
   --proj_type mlp \
   --structural_loss simple \
+  --lambda_aux 1.0 \
   --lambda_seg 0.1 \
   --lambda_depth 0.1 \
+  --auxdec_layers 2 \
+  --auxdec_heads 8 \
   --max_seq_len 2048 \
   --per_device_batch_size 2 \
   --gradient_accumulation_steps 8 \
@@ -15,3 +19,4 @@ deepspeed --num_gpus=4 src/train.py \
   --lr 2e-4 \
   --output_dir checkpoints/stage1 \
   --deepspeed configs/deepspeed_config.json
+

@@ -1,131 +1,136 @@
-# HypPlan Stage-1 Pipeline
+# HypPlan
 
-Stage-1 training and evaluation pipeline for planning-token supervision on top of a frozen `Qwen/Qwen2.5-7B`.
+Two-stage planning-token training pipeline on top of `Qwen/Qwen2.5-7B`.
 
-## What this repo contains
+This repo implements:
 
-- Training code for a trainable planning projection module (`Proj`) over a frozen base LM.
-- Structural supervision losses:
-  - `simple`: segment classification + depth regression
-  - `contrastive`: InfoNCE segment loss + monotonic hinge depth loss
-- Evaluation scripts for:
-  - Vanilla CoT baseline on MATH test
-  - Planning-token controller inference on MATH test
+- **Stage 1 (warm-up)**: frozen base model + trainable projection (`Proj`), auxiliary decoder, and structural losses.
+- **Stage 2 (joint tuning)**: LoRA tuning + `Proj` with two-pass plan injection.
+- **Evaluation**:
+  - vanilla CoT baseline
+  - planning model inference (`autonomous` or `external_controller`)
 
-## Project layout
+The full design spec is in `pipeline_spec_v2.md`.
 
-- `src/data/`: preprocessing + dataset + collate
-- `src/model/`: planning wrapper and projection modules
-- `src/losses/`: structural losses
-- `src/evaluation/`: baseline/planning evaluation + math grading
-- `src/train.py`: main Stage-1 training entrypoint
-- `configs/`: DeepSpeed + default args
-- `scripts/`: convenience shell scripts
+## Repository Layout
+
+- `src/train_stage1.py`: Stage 1 training entrypoint
+- `src/train_stage2.py`: Stage 2 training entrypoint
+- `src/data/`: preprocessing and dataset
+- `src/model/`: projection module, planning wrapper, auxiliary decoder
+- `src/losses/`: structural loss implementations
+- `src/evaluation/`: baseline/planning evaluation and answer grading
+- `configs/`: DeepSpeed and default argument configs
+- `scripts/`: ready-to-run launch scripts
 
 ## Requirements
 
-Install dependencies:
+- Python 3.10+
+- CUDA GPUs (scripts are configured for 4 GPUs)
+- Install deps:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Core libraries include `torch`, `transformers`, `datasets`, `deepspeed`, and `sympy`.
+## Data Format
 
-## Data
-
-Expected training file:
-
-- `data/prm800k_annotated.jsonl`
-
-Each line should contain:
+Stage 1/2 training expects a JSONL file where each line has:
 
 - `problem` (string)
 - `ground_truth_answer` (string, optional for training)
-- `steps` (list of step objects with `step_text`, `segment_id`, and metadata)
+- `steps` (list of step objects with `step_index`, `step_text`)
+- `annotations` (recommended), where each item includes:
+  - `step_index`
+  - `step_text`
+  - `segment_id`
+  - `segment_goal`
 
-The loader derives:
+Important:
 
-- `is_boundary`
-- `within_segment_depth`
+- If `annotations` is missing, the loader falls back to `steps` for structure labels.
+- In that fallback case, each `steps` item must already include `segment_id`, otherwise structural label derivation fails.
+- Samples with `<=1` step are dropped.
 
-Filtering behavior:
+Default training path is `data/prm800k_annotated.jsonl`.
 
-- Drops solutions with 0 or 1 step
-- Drops samples whose built sequence would exceed `max_seq_len` (default `2048`)
+## Create Train/Eval/Test Splits
 
-## Training
-
-Recommended command (4 GPUs):
-
-```bash
-deepspeed --num_gpus=4 src/train.py \
-  --data_path data/prm800k_annotated.jsonl \
-  --model_name Qwen/Qwen2.5-7B \
-  --proj_type mlp \
-  --structural_loss simple \
-  --lambda_seg 0.1 \
-  --lambda_depth 0.1 \
-  --max_seq_len 2048 \
-  --per_device_batch_size 2 \
-  --gradient_accumulation_steps 8 \
-  --num_epochs 3 \
-  --lr 2e-4 \
-  --output_dir checkpoints/stage1 \
-  --deepspeed configs/deepspeed_config.json
-```
-
-Or use:
+Generate split files from `data/prm800k_annotated.jsonl`:
 
 ```bash
-./scripts/run_train.sh
+python -m src.data.split_dataset \
+  --input_path data/prm800k_annotated.jsonl \
+  --output_dir data/prm800k_splits \
+  --seed 42 \
+  --eval_name eval
 ```
 
-## Baseline evaluation (vanilla CoT)
+This creates:
+
+- `data/prm800k_splits/train.jsonl`
+- `data/prm800k_splits/eval.jsonl`
+- `data/prm800k_splits/test.jsonl`
+
+## Quick Start
+
+Run from repo root.
+
+### Stage 1
 
 ```bash
-torchrun --nproc_per_node=4 src/evaluation/baseline_eval.py \
-  --model_name Qwen/Qwen2.5-7B \
-  --max_new_tokens 1024 \
-  --output_file results/baseline.json
+bash scripts/run_stage1.sh
 ```
 
-Or:
+### Stage 2
 
 ```bash
-./scripts/run_baseline_eval.sh
+bash scripts/run_stage2.sh
 ```
 
-## Planning evaluation
+### Baseline Evaluation
 
 ```bash
-torchrun --nproc_per_node=4 src/evaluation/planning_eval.py \
-  --model_name Qwen/Qwen2.5-7B \
-  --proj_checkpoint checkpoints/stage1/proj_best.pt \
-  --proj_type mlp \
-  --structural_loss simple \
-  --max_steps 20 \
-  --max_step_tokens 256 \
-  --output_file results/planning.json
+bash scripts/run_baseline_eval.sh
 ```
 
-Or:
+### Planning Evaluation (autonomous mode in script)
 
 ```bash
-./scripts/run_planning_eval.sh
+bash scripts/run_planning_eval.sh
 ```
+
+## Direct CLI Examples
+
+The scripts above wrap these commands:
+
+- Stage 1: `deepspeed --num_gpus=4 --module src.train_stage1 ...`
+- Stage 2: `deepspeed --num_gpus=4 --module src.train_stage2 ...`
+- Baseline eval: `torchrun --nproc_per_node=4 -m src.evaluation.baseline_eval ...`
+- Planning eval: `torchrun --nproc_per_node=4 -m src.evaluation.planning_eval ...`
+
+For smoke tests on smaller files, override `--data_path` (for example `data/prm800k_annotated_10.jsonl`) and optionally `--limit`.
 
 ## Outputs
 
-- Checkpoints:
-  - `checkpoints/stage1/epoch_*.pt`
-  - `checkpoints/stage1/proj_best.pt`
-- Metrics/results:
+- Stage 1 (`--output_dir`, default `checkpoints/stage1`):
+  - `proj.pt`
+  - `aux_heads.pt`
+  - `train_args.json`
+- Stage 2 (`--output_dir`, default `checkpoints/stage2`):
+  - `lora_adapters/`
+  - `proj.pt`
+  - `plan_token_delta.pt`
+  - `train_args.json`
+- Evaluation:
   - `results/baseline.json`
-  - `results/planning.json`
+  - `results/stage2_autonomous.json` (or your selected output path)
 
 ## Notes
 
-- Base LM parameters are frozen; only `Proj` and structural heads are trainable.
-- The tokenizer is extended with `[PLAN]` at runtime.
-- For reproducibility, set `--seed` (default `42`).
+- The run scripts assume multi-GPU (4 processes). Adjust `--num_gpus` / `--nproc_per_node` for your machine.
+- `configs/deepspeed_config.json` sets ZeRO-2 + bf16 defaults.
+- The tokenizer is extended with a special token: `[PLAN]`.
+- Stage 1/2 scripts use `data/prm800k_splits/train.jsonl` with `--presplit_data`.
+- Eval scripts use `data/prm800k_splits/eval.jsonl` by default (`--local_eval_path`).
+

@@ -7,251 +7,334 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
-from tqdm import tqdm
-from transformers import AutoTokenizer
+from datasets import load_dataset
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.evaluation.math_grading import extract_boxed, grade_answer
-from src.evaluation.math_dataset import load_math_test
-from src.model.planning_model import PlanningQwen
+from src.model.proj import ProjectionModule
 
 
-def setup_distributed() -> tuple[int, int]:
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
+PROMPT_TEMPLATE = (
+    "Solve the following math problem step by step. Put your final answer in \\boxed{{}}.\n\n"
+    "Problem: {problem}\n"
+    "Solution:\n"
+)
+
+
+def ddp_info() -> tuple[int, int, int]:
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    if world_size > 1 and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
-        return rank, world_size
-    return 0, 1
+    return rank, world_size, local_rank
 
 
-def cleanup_distributed() -> None:
-    if dist.is_available() and dist.is_initialized():
-        dist.destroy_process_group()
+def shard(items: list[dict], rank: int, world_size: int) -> list[dict]:
+    return [x for i, x in enumerate(items) if i % world_size == rank]
 
 
-def build_prompt(problem: str) -> str:
-    return (
-        "Solve the following math problem step by step. "
-        "Put your final answer in \\boxed{}.\n\n"
-        f"Problem: {problem}\n"
-        "Solution:\n"
-    )
-
-
-def compute_metrics(results: list[dict]) -> dict:
-    total = len(results)
-    correct = sum(int(x["correct"]) for x in results)
-
-    by_level = defaultdict(lambda: {"correct": 0, "total": 0})
-    by_subject = defaultdict(lambda: {"correct": 0, "total": 0})
-
-    for row in results:
-        level = row.get("level", "unknown")
-        subject = row.get("subject", "unknown")
-        by_level[level]["total"] += 1
-        by_level[level]["correct"] += int(row["correct"])
-        by_subject[subject]["total"] += 1
-        by_subject[subject]["correct"] += int(row["correct"])
-
-    def finalize(bucket):
-        out = {}
-        for k, v in bucket.items():
-            out[k] = {
-                "accuracy": v["correct"] / max(v["total"], 1),
-                "correct": v["correct"],
-                "total": v["total"],
-            }
-        return out
-
+def summarize(results: list[dict]) -> dict:
+    overall = sum(int(r["correct"]) for r in results) / max(1, len(results))
+    by_level = defaultdict(list)
+    by_subject = defaultdict(list)
+    for r in results:
+        by_level[r["level"]].append(int(r["correct"]))
+        by_subject[r["subject"]].append(int(r["correct"]))
     return {
-        "overall_accuracy": correct / max(total, 1),
-        "overall_correct": correct,
-        "overall_total": total,
-        "avg_steps_generated": sum(x["steps_generated"] for x in results) / max(total, 1),
-        "avg_segments_detected": sum(x["segments_detected"] for x in results) / max(total, 1),
-        "by_level": finalize(by_level),
-        "by_subject": finalize(by_subject),
+        "overall_accuracy": overall,
+        "count": len(results),
+        "avg_steps_generated": sum(r["steps_generated"] for r in results) / max(1, len(results)),
+        "avg_plan_tokens_emitted": sum(r["plan_tokens_emitted"] for r in results) / max(1, len(results)),
+        "by_level": {k: sum(v) / len(v) for k, v in by_level.items()},
+        "by_subject": {k: sum(v) / len(v) for k, v in by_subject.items()},
     }
 
 
-def _detect_newline_boundary(decoded_text: str) -> bool:
-    return decoded_text.endswith("\n\n")
+def load_local_jsonl(path: str) -> list[dict]:
+    rows: list[dict] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
 
 
-def generate_one_step(
-    model: PlanningQwen,
-    tokenizer,
-    context_ids: torch.Tensor,
-    plan_token_id: int,
-    max_step_tokens: int,
-    device: torch.device,
-) -> tuple[list[int], torch.Tensor]:
-    plan_input = torch.cat(
-        [context_ids, torch.tensor([[plan_token_id]], device=device, dtype=torch.long)],
-        dim=1,
+def load_math_test_split(dataset_name: str, split: str, dataset_config: str | None):
+    tried: list[tuple[str, str | None, str]] = []
+    candidates = [dataset_name]
+    for fallback in ["EleutherAI/hendrycks_math", "hendrycks/competition_math"]:
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    for name in candidates:
+        config = dataset_config if name == dataset_name else None
+        try:
+            if config:
+                ds = load_dataset(name, config, split=split)
+            else:
+                ds = load_dataset(name, split=split)
+            print(f"Loaded dataset: name={name}, split={split}, config={config}")
+            return ds
+        except Exception as exc:  # noqa: BLE001
+            tried.append((name, config, str(exc)))
+
+    details = "\n".join(
+        f"- name={name}, split={split}, config={config}: {err}" for name, config, err in tried
+    )
+    raise RuntimeError(
+        "Failed to load MATH dataset from provided name and fallbacks.\n"
+        f"Tried:\n{details}"
     )
 
-    with torch.no_grad():
-        out = model.base_model(
-            input_ids=plan_input,
+
+def _next_token_forward(
+    model,
+    token_id: torch.Tensor,
+    past_key_values,
+    plan_pending: torch.Tensor | None,
+):
+    if plan_pending is not None:
+        embed = model.get_input_embeddings()(token_id)
+        outputs = model(
+            inputs_embeds=embed + plan_pending.unsqueeze(1),
+            past_key_values=past_key_values,
+            use_cache=True,
             output_hidden_states=True,
-            use_cache=False,
             return_dict=True,
         )
-        hidden = out.hidden_states[-1]
-        h_plan = hidden[:, -1, :]
-        t_i = model.proj(h_plan)
-        hidden[:, -1, :] = hidden[:, -1, :] + t_i
-        logits = model.base_model.lm_head(hidden)
-        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-
-    generated = [int(next_token.item())]
-    running = torch.cat([plan_input, next_token], dim=1)
-
-    for _ in range(max_step_tokens - 1):
-        with torch.no_grad():
-            out = model.base_model(input_ids=running, use_cache=False, return_dict=True)
-            step_next = torch.argmax(out.logits[:, -1, :], dim=-1, keepdim=True)
-        generated.append(int(step_next.item()))
-        running = torch.cat([running, step_next], dim=1)
-
-        text = tokenizer.decode(generated, skip_special_tokens=False)
-        if _detect_newline_boundary(text):
-            break
-
-    return generated, t_i.squeeze(0)
+        return outputs
+    return model(
+        input_ids=token_id,
+        past_key_values=past_key_values,
+        use_cache=True,
+        output_hidden_states=True,
+        return_dict=True,
+    )
 
 
-def estimate_segments(model: PlanningQwen, plan_vectors: list[torch.Tensor]) -> int:
-    if not plan_vectors:
-        return 0
-    vec = torch.stack(plan_vectors, dim=0)
+def autonomous_generate(
+    model,
+    tokenizer,
+    proj,
+    prompt: str,
+    max_new_tokens: int,
+    plan_token_id: int,
+) -> tuple[str, int, int]:
+    device = next(model.parameters()).device
+    with torch.no_grad():
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        outputs = model(**inputs, use_cache=True, output_hidden_states=True, return_dict=True)
+        past_key_values = outputs.past_key_values
+        next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated: list[int] = []
+        plan_pending: torch.Tensor | None = None
+        plan_count = 0
 
-    if model.segment_classifier is not None:
-        logits = model.segment_classifier(vec)
-        pred = torch.argmax(logits, dim=-1)
-        return int((pred[1:] != pred[:-1]).sum().item()) + 1
+        for _ in range(max_new_tokens):
+            outputs = _next_token_forward(model, next_token, past_key_values, plan_pending)
+            past_key_values = outputs.past_key_values
+            plan_pending = None
+            token_val = int(next_token.item())
+            generated.append(token_val)
+            if token_val == plan_token_id:
+                h_plan = outputs.hidden_states[-1][:, -1, :]
+                plan_pending = proj(h_plan)
+                plan_count += 1
 
-    # Contrastive mode fallback: count depth-score resets as segment boundaries.
-    half = vec.size(-1) // 2
-    scores = model.depth_readout(vec[:, half:]).squeeze(-1)
-    return int((scores[1:] < scores[:-1]).sum().item()) + 1
+            decoded = tokenizer.decode(generated, skip_special_tokens=False)
+            if token_val == tokenizer.eos_token_id or extract_boxed(decoded) is not None:
+                break
+            next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    return tokenizer.decode(generated, skip_special_tokens=False), len(generated), plan_count
+
+
+def external_controller_generate(
+    model,
+    tokenizer,
+    proj,
+    prompt: str,
+    max_steps: int,
+    max_step_tokens: int,
+    plan_token_id: int,
+) -> tuple[str, int, int]:
+    device = next(model.parameters()).device
+    ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    all_generated = ids
+    plan_count = 0
+    total_tokens = 0
+
+    with torch.no_grad():
+        for _ in range(max_steps):
+            # Pass up to current context for cache.
+            pref = model(input_ids=all_generated, use_cache=True, return_dict=True)
+            past = pref.past_key_values
+
+            # Inject plan on the [PLAN] token embedding and obtain updated cache.
+            plan_embed = model.get_input_embeddings()(
+                torch.tensor([[plan_token_id]], device=device, dtype=torch.long)
+            )
+            h_plan = model(
+                inputs_embeds=plan_embed,
+                past_key_values=past,
+                output_hidden_states=True,
+                use_cache=True,
+                return_dict=True,
+            ).hidden_states[-1][:, -1, :]
+            t_i = proj(h_plan)
+
+            plan_out = model(
+                inputs_embeds=plan_embed + t_i.unsqueeze(1),
+                past_key_values=past,
+                use_cache=True,
+                return_dict=True,
+            )
+            step_past = plan_out.past_key_values
+            next_token = plan_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            plan_count += 1
+
+            step_tokens = []
+            for _ in range(max_step_tokens):
+                step_out = model(
+                    input_ids=next_token,
+                    past_key_values=step_past,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                step_past = step_out.past_key_values
+                tok = int(next_token.item())
+                step_tokens.append(tok)
+                total_tokens += 1
+                text = tokenizer.decode(step_tokens, skip_special_tokens=False)
+                if tok == tokenizer.eos_token_id or "\n\n" in text or extract_boxed(text) is not None:
+                    break
+                next_token = step_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+            append = torch.tensor(
+                [[plan_token_id] + step_tokens], device=device, dtype=torch.long
+            )
+            all_generated = torch.cat([all_generated, append], dim=1)
+            if extract_boxed(tokenizer.decode(all_generated[0], skip_special_tokens=False)) is not None:
+                break
+    text = tokenizer.decode(all_generated[0], skip_special_tokens=False)
+    return text, total_tokens, plan_count
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B")
-    parser.add_argument("--proj_checkpoint", type=str, required=True)
-    parser.add_argument("--proj_type", type=str, default="mlp", choices=["linear", "mlp"])
-    parser.add_argument(
-        "--structural_loss",
-        type=str,
-        default="simple",
-        choices=["simple", "contrastive"],
-    )
+    parser.add_argument("--model_name", default="Qwen/Qwen2.5-7B")
+    parser.add_argument("--dataset_name", default="EleutherAI/hendrycks_math")
+    parser.add_argument("--dataset_split", default="test")
+    parser.add_argument("--dataset_config", default=None)
+    parser.add_argument("--local_eval_path", default=None)
+    parser.add_argument("--lora_checkpoint", default=None)
+    parser.add_argument("--proj_checkpoint", required=True)
+    parser.add_argument("--proj_type", default="mlp", choices=["linear", "mlp"])
+    parser.add_argument("--inference_mode", choices=["autonomous", "external_controller"], required=True)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--max_steps", type=int, default=20)
     parser.add_argument("--max_step_tokens", type=int, default=256)
-    parser.add_argument("--output_file", type=str, required=True)
+    parser.add_argument("--output_file", required=True)
     args = parser.parse_args()
 
-    rank, world_size = setup_distributed()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rank, world_size, local_rank = ddp_info()
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     tokenizer.add_special_tokens({"additional_special_tokens": ["[PLAN]"]})
     plan_token_id = tokenizer.convert_tokens_to_ids("[PLAN]")
 
-    model = PlanningQwen(
-        model_name=args.model_name,
-        proj_type=args.proj_type,
-        structural_loss=args.structural_loss,
-    ).to(device)
-    model.resize_token_embeddings(len(tokenizer))
-    model.load_trainable_state_dict(torch.load(args.proj_checkpoint, map_location="cpu"))
-    model.eval()
+    base = AutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        trust_remote_code=True,
+    )
+    base.resize_token_embeddings(len(tokenizer))
+    if args.lora_checkpoint:
+        base = PeftModel.from_pretrained(base, args.lora_checkpoint)
+        base = base.merge_and_unload()
+    model = base.to(device).eval()
 
-    ds = load_math_test()
-    all_items = [dict(x) for x in ds]
-    shard = [x for i, x in enumerate(all_items) if i % world_size == rank]
+    proj = ProjectionModule(model.config.hidden_size, proj_type=args.proj_type).to(device)
+    proj.load_state_dict(torch.load(args.proj_checkpoint, map_location=device))
+    proj.eval()
+
+    if args.local_eval_path:
+        problems = load_local_jsonl(args.local_eval_path)
+        if rank == 0:
+            print(f"Loaded local eval file: {args.local_eval_path} ({len(problems)} samples)")
+    else:
+        ds = load_math_test_split(
+            dataset_name=args.dataset_name,
+            split=args.dataset_split,
+            dataset_config=args.dataset_config,
+        )
+        problems = [dict(x) for x in ds]
+    local = shard(problems, rank, world_size)
 
     local_results = []
-    iterator = tqdm(
-        shard,
-        disable=(rank != 0),
-        mininterval=60.0,
-        miniters=50,
-    )
-    for item in iterator:
-        prompt = build_prompt(item["problem"])
-        context_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-
-        step_count = 0
-        plan_vectors: list[torch.Tensor] = []
-        for _ in range(args.max_steps):
-            step_tokens, t_i = generate_one_step(
+    for item in local:
+        prompt = PROMPT_TEMPLATE.format(problem=item["problem"])
+        if args.inference_mode == "autonomous":
+            generated, steps_generated, plan_emitted = autonomous_generate(
                 model=model,
                 tokenizer=tokenizer,
-                context_ids=context_ids,
+                proj=proj,
+                prompt=prompt,
+                max_new_tokens=args.max_new_tokens,
                 plan_token_id=plan_token_id,
+            )
+        else:
+            generated, steps_generated, plan_emitted = external_controller_generate(
+                model=model,
+                tokenizer=tokenizer,
+                proj=proj,
+                prompt=prompt,
+                max_steps=args.max_steps,
                 max_step_tokens=args.max_step_tokens,
-                device=device,
-            )
-            step_count += 1
-            plan_vectors.append(t_i.detach().float().cpu())
-
-            appended = torch.tensor(step_tokens, dtype=torch.long, device=device).unsqueeze(0)
-            context_ids = torch.cat(
-                [
-                    context_ids,
-                    torch.tensor([[plan_token_id]], dtype=torch.long, device=device),
-                    appended,
-                ],
-                dim=1,
+                plan_token_id=plan_token_id,
             )
 
-            decoded = tokenizer.decode(context_ids[0], skip_special_tokens=True)
-            if extract_boxed(decoded) is not None:
-                break
-
-        decoded = tokenizer.decode(context_ids[0], skip_special_tokens=True)
-        pred = extract_boxed(decoded)
-        gt = extract_boxed(item.get("solution", ""))
-        correct = grade_answer(pred, gt)
-        segments_detected = estimate_segments(model, plan_vectors)
-
+        pred = extract_boxed(generated)
+        if "solution" in item:
+            gold = extract_boxed(str(item["solution"])) or str(item["solution"]).strip()
+        else:
+            gold = str(item.get("ground_truth_answer", "")).strip()
         local_results.append(
             {
                 "problem": item["problem"],
+                "subject": item.get("type", item.get("subject", "unknown")),
+                "level": str(item.get("level", "unknown")),
                 "prediction": pred,
-                "ground_truth": gt,
-                "correct": correct,
-                "level": item.get("level", "unknown"),
-                "subject": item.get("type", "unknown"),
-                "steps_generated": step_count,
-                "segments_detected": segments_detected,
+                "gold": gold,
+                "correct": grade_answer(pred, gold),
+                "steps_generated": steps_generated,
+                "plan_tokens_emitted": plan_emitted,
             }
         )
 
-    gathered = [None for _ in range(world_size)]
+    gathered: list[list[dict]] = [None for _ in range(world_size)]  # type: ignore[list-item]
     if world_size > 1:
         dist.all_gather_object(gathered, local_results)
-        results = [x for part in gathered for x in part]
     else:
-        results = local_results
+        gathered = [local_results]
 
     if rank == 0:
-        metrics = compute_metrics(results)
-        payload = {"metrics": metrics, "results": results}
+        merged = [x for part in gathered for x in part]
+        payload = {"metrics": summarize(merged), "results": merged}
         os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
         with open(args.output_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(json.dumps(metrics, indent=2))
+        print(json.dumps(payload["metrics"], indent=2))
 
-    cleanup_distributed()
+    if world_size > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     main()
+

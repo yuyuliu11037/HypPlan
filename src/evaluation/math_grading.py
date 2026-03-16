@@ -1,37 +1,38 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
-from sympy import simplify, sympify
-
-
-BOXED_PATTERN = re.compile(r"\\boxed\{([^}]*)\}")
+import sympy as sp
 
 
-def extract_boxed(text: str) -> Optional[str]:
-    matches = BOXED_PATTERN.findall(text)
+BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
+
+
+def extract_boxed(text: str) -> str | None:
+    matches = BOXED_RE.findall(text)
     if not matches:
         return None
     return matches[-1].strip()
 
 
-def _normalize_answer(text: str) -> str:
-    text = text.strip()
-    text = text.replace("$", "")
-    return text
+def _normalize(expr: str) -> str:
+    expr = expr.strip()
+    if expr.endswith("."):
+        expr = expr[:-1]
+    return expr
 
 
-def grade_answer(predicted: str | None, ground_truth: str | None) -> bool:
-    if predicted is None or ground_truth is None:
+def grade_answer(pred: str | None, gold: str | None) -> bool:
+    if pred is None or gold is None:
         return False
-
-    p = _normalize_answer(predicted)
-    g = _normalize_answer(ground_truth)
-    if p == g:
+    pred_n = _normalize(pred)
+    gold_n = _normalize(gold)
+    if pred_n == gold_n:
         return True
-
     try:
-        return simplify(sympify(p) - sympify(g)) == 0
-    except Exception:
+        p = sp.sympify(pred_n)
+        g = sp.sympify(gold_n)
+        return bool(sp.simplify(p - g) == 0)
+    except Exception:  # noqa: BLE001
         return False
+

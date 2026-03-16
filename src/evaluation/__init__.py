@@ -1,1 +1,2 @@
-"""Evaluation helpers and runners."""
+"""Evaluation utilities for baseline and planning models."""
+

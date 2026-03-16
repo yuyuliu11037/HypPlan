@@ -1,61 +1,51 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
-from pathlib import Path
+from collections import defaultdict
 from typing import Any
 
 import torch
 from torch.utils.data import Dataset
 
-from src.data.preprocessing import build_training_example
+from .preprocessing import encode_sample
 
 
-def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
+def _problem_bucket(problem: str, seed: int) -> float:
+    digest = hashlib.sha256(f"{seed}:{problem}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) / 0xFFFFFFFF
+
+
+def split_by_problem(
+    raw_samples: list[dict[str, Any]],
+    seed: int = 42,
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for sample in raw_samples:
+        grouped[str(sample["problem"])].append(sample)
+
+    splits: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
+    for problem, group in grouped.items():
+        r = _problem_bucket(problem, seed)
+        if r < 0.9:
+            split = "train"
+        elif r < 0.95:
+            split = "val"
+        else:
+            split = "test"
+        splits[split].extend(group)
+    return splits
+
+
+def load_jsonl(path: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
-            rows.append(json.loads(line))
-    return rows
-
-
-def _split_by_problem(
-    rows: list[dict[str, Any]],
-    split: str,
-    seed: int,
-) -> list[dict[str, Any]]:
-    if split not in {"train", "val", "test"}:
-        raise ValueError(f"Unsupported split: {split}")
-
-    if rows and "split" in rows[0]:
-        return [r for r in rows if r.get("split") == split]
-
-    by_problem: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        by_problem.setdefault(row["problem"], []).append(row)
-
-    problems = list(by_problem.keys())
-    rng = random.Random(seed)
-    rng.shuffle(problems)
-
-    n = len(problems)
-    n_train = int(0.90 * n)
-    n_val = int(0.05 * n)
-
-    if split == "train":
-        selected = set(problems[:n_train])
-    elif split == "val":
-        selected = set(problems[n_train : n_train + n_val])
-    else:
-        selected = set(problems[n_train + n_val :])
-
-    out: list[dict[str, Any]] = []
-    for p in selected:
-        out.extend(by_problem[p])
-    return out
+            records.append(json.loads(line))
+    return records
 
 
 class PlanningTokenDataset(Dataset):
@@ -63,45 +53,26 @@ class PlanningTokenDataset(Dataset):
         self,
         data_path: str,
         tokenizer: Any,
-        split: str = "train",
-        seed: int = 42,
+        split: str,
         max_seq_len: int = 2048,
-        plan_token: str = "[PLAN]",
-        max_segments: int = 16,
+        seed: int = 42,
+        limit: int | None = None,
+        presplit: bool = False,
     ) -> None:
-        self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
-        self.max_segments = max_segments
+        if split not in {"train", "val", "test"}:
+            raise ValueError(f"Unsupported split: {split}")
+        raw = load_jsonl(data_path)
+        split_records = raw if presplit else split_by_problem(raw, seed=seed)[split]
+        if limit is not None:
+            random.Random(seed).shuffle(split_records)
+            split_records = split_records[:limit]
 
-        plan_token_id = tokenizer.convert_tokens_to_ids(plan_token)
-        if plan_token_id == tokenizer.unk_token_id:
-            raise ValueError(
-                f"Token {plan_token!r} is not in tokenizer vocab. "
-                "Call tokenizer.add_special_tokens first."
-            )
-
-        rows = _read_jsonl(data_path)
-        rows = [r for r in rows if len(r.get("steps", [])) > 1]
-        rows = _split_by_problem(rows, split=split, seed=seed)
-
-        samples: list[dict[str, Any]] = []
-        for sample_idx, row in enumerate(rows):
-            ex = build_training_example(
-                problem=row["problem"],
-                steps=row["steps"],
-                tokenizer=tokenizer,
-                plan_token_id=plan_token_id,
-                max_seq_len=max_seq_len,
-                max_segments=max_segments,
-            )
-            if ex is None:
-                continue
-            ex["solution_uid"] = sample_idx
-            ex["problem"] = row["problem"]
-            ex["ground_truth_answer"] = row.get("ground_truth_answer", "")
-            samples.append(ex)
-
-        self.samples = samples
+        encoded: list[dict[str, Any]] = []
+        for sample in split_records:
+            item = encode_sample(sample, tokenizer=tokenizer, max_seq_len=max_seq_len)
+            if item is not None:
+                encoded.append(item)
+        self.samples = encoded
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -110,52 +81,30 @@ class PlanningTokenDataset(Dataset):
         return self.samples[idx]
 
 
-def collate_fn(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    if not batch:
-        raise ValueError("Batch is empty.")
-
-    bs = len(batch)
+def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     max_len = max(len(x["input_ids"]) for x in batch)
-    max_plan = max(len(x["plan_positions"]) for x in batch)
+    pad_id = 0
 
-    input_ids = torch.full((bs, max_len), fill_value=0, dtype=torch.long)
-    attention_mask = torch.zeros((bs, max_len), dtype=torch.long)
-    step_ids = torch.full((bs, max_len), fill_value=-1, dtype=torch.long)
-    token_loss_mask = torch.zeros((bs, max_len), dtype=torch.bool)
+    def pad(seq: list[int], fill: int) -> list[int]:
+        return seq + [fill] * (max_len - len(seq))
 
-    plan_positions = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
-    plan_mask = torch.zeros((bs, max_plan), dtype=torch.bool)
-    segment_ids_raw = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
-    segment_labels = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
-    depth_labels = torch.zeros((bs, max_plan), dtype=torch.float)
-    solution_ids = torch.full((bs, max_plan), fill_value=-1, dtype=torch.long)
-
-    for i, ex in enumerate(batch):
-        seq_len = len(ex["input_ids"])
-        n_plan = len(ex["plan_positions"])
-
-        input_ids[i, :seq_len] = torch.tensor(ex["input_ids"], dtype=torch.long)
-        attention_mask[i, :seq_len] = 1
-        step_ids[i, :seq_len] = torch.tensor(ex["step_ids"], dtype=torch.long)
-        token_loss_mask[i, :seq_len] = torch.tensor(ex["token_loss_mask"], dtype=torch.bool)
-
-        if n_plan > 0:
-            plan_positions[i, :n_plan] = torch.tensor(ex["plan_positions"], dtype=torch.long)
-            plan_mask[i, :n_plan] = True
-            segment_ids_raw[i, :n_plan] = torch.tensor(ex["segment_ids_raw"], dtype=torch.long)
-            segment_labels[i, :n_plan] = torch.tensor(ex["segment_labels"], dtype=torch.long)
-            depth_labels[i, :n_plan] = torch.tensor(ex["depth_labels"], dtype=torch.float)
-            solution_ids[i, :n_plan] = ex["solution_uid"]
+    input_ids = torch.tensor([pad(x["input_ids"], pad_id) for x in batch], dtype=torch.long)
+    attention_mask = torch.tensor([pad(x["attention_mask"], 0) for x in batch], dtype=torch.long)
+    step_ids = torch.tensor([pad(x["step_ids"], -1) for x in batch], dtype=torch.long)
+    labels_stage1 = torch.tensor([pad(x["labels_stage1"], -100) for x in batch], dtype=torch.long)
+    labels_stage2 = torch.tensor([pad(x["labels_stage2"], -100) for x in batch], dtype=torch.long)
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "step_ids": step_ids,
-        "token_loss_mask": token_loss_mask,
-        "plan_positions": plan_positions,
-        "plan_mask": plan_mask,
-        "segment_ids_raw": segment_ids_raw,
-        "segment_labels": segment_labels,
-        "depth_labels": depth_labels,
-        "solution_ids": solution_ids,
+        "labels_stage1": labels_stage1,
+        "labels_stage2": labels_stage2,
+        "plan_positions": [x["plan_positions"] for x in batch],
+        "step_spans": [x["step_spans"] for x in batch],
+        "segment_ids": [x["segment_ids"] for x in batch],
+        "within_segment_depths": [x["within_segment_depths"] for x in batch],
+        "problems": [x["problem"] for x in batch],
+        "ground_truth_answers": [x["ground_truth_answer"] for x in batch],
     }
+
