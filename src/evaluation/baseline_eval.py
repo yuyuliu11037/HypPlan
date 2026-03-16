@@ -10,7 +10,7 @@ import torch.distributed as dist
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.evaluation.math_grading import extract_boxed, grade_answer
+from src.evaluation.math_grading import extract_final_answer, grade_answer
 
 
 PROMPT_TEMPLATE = (
@@ -94,6 +94,7 @@ def main() -> None:
     parser.add_argument("--dataset_split", default="test")
     parser.add_argument("--dataset_config", default=None)
     parser.add_argument("--local_eval_path", default=None)
+    parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--output_file", required=True)
     args = parser.parse_args()
@@ -120,6 +121,8 @@ def main() -> None:
             dataset_config=args.dataset_config,
         )
         problems = [dict(x) for x in ds]
+    if args.max_samples is not None:
+        problems = problems[: args.max_samples]
     local = shard(problems, rank, world_size)
 
     local_results = []
@@ -133,10 +136,11 @@ def main() -> None:
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
-        decoded = tokenizer.decode(out[0], skip_special_tokens=True)
-        pred = extract_boxed(decoded)
+        completion_ids = out[0][inputs["input_ids"].size(1) :]
+        completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True)
+        pred = extract_final_answer(completion_text)
         if "solution" in item:
-            gold = extract_boxed(str(item["solution"])) or str(item["solution"]).strip()
+            gold = extract_final_answer(str(item["solution"])) or str(item["solution"]).strip()
         else:
             gold = str(item.get("ground_truth_answer", "")).strip()
         local_results.append(
@@ -147,6 +151,8 @@ def main() -> None:
                 "prediction": pred,
                 "gold": gold,
                 "correct": grade_answer(pred, gold),
+                "generated_tokens": int(completion_ids.numel()),
+                "generated_text": completion_text,
             }
         )
 

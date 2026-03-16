@@ -20,6 +20,23 @@ def masked_causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.T
     )
 
 
+def apply_plan_token_logit_delta(
+    logits: torch.Tensor,
+    hidden_states: torch.Tensor,
+    plan_token_id: int,
+    plan_token_delta: torch.Tensor | None,
+) -> torch.Tensor:
+    if plan_token_delta is None:
+        return logits
+    adjusted = logits.clone()
+    delta = torch.matmul(
+        hidden_states.to(dtype=plan_token_delta.dtype),
+        plan_token_delta,
+    ).to(dtype=adjusted.dtype)
+    adjusted[..., plan_token_id] = adjusted[..., plan_token_id] + delta
+    return adjusted
+
+
 class PlanningQwen(nn.Module):
     def __init__(
         self,
@@ -53,6 +70,16 @@ class PlanningQwen(nn.Module):
         proj_dtype = next(self.proj.parameters()).dtype
         t = self.proj(h_plan.to(dtype=proj_dtype))
         return h_plan, t
+
+    def _flat_plan_indices(self, input_ids: torch.Tensor) -> list[tuple[int, int, int]]:
+        indices: list[tuple[int, int, int]] = []
+        flat_index = 0
+        for b_idx in range(input_ids.size(0)):
+            plan_positions = torch.where(input_ids[b_idx] == self.plan_token_id)[0]
+            for plan_pos in plan_positions.tolist():
+                indices.append((b_idx, plan_pos, flat_index))
+                flat_index += 1
+        return indices
 
     def _apply_hidden_injection(
         self,
@@ -193,27 +220,25 @@ class PlanningQwen(nn.Module):
             _, t_flat = self._collect_plan_vectors(pass1.hidden_states[-1], batch["input_ids"])
 
         injected = input_embeds.clone()
-        for b_idx in range(batch["input_ids"].size(0)):
-            plan_positions = torch.where(batch["input_ids"][b_idx] == self.plan_token_id)[0]
-            for local_idx, plan_pos in enumerate(plan_positions):
-                inject_pos = plan_pos + 1
-                if inject_pos >= batch["input_ids"].size(1):
-                    continue
-                flat_index = sum(
-                    torch.where(batch["input_ids"][k] == self.plan_token_id)[0].numel()
-                    for k in range(b_idx)
-                ) + local_idx
-                if flat_index < t_flat.size(0):
-                    injected[b_idx, inject_pos, :] = (
-                        injected[b_idx, inject_pos, :] + t_flat[flat_index].to(dtype=injected.dtype)
-                    )
+        for b_idx, plan_pos, flat_index in self._flat_plan_indices(batch["input_ids"]):
+            if flat_index < t_flat.size(0):
+                injected[b_idx, plan_pos, :] = (
+                    injected[b_idx, plan_pos, :] + t_flat[flat_index].to(dtype=injected.dtype)
+                )
 
         pass2 = self.base_model(
             inputs_embeds=injected,
             attention_mask=batch["attention_mask"],
             use_cache=False,
+            output_hidden_states=True,
             return_dict=True,
         )
-        lm_loss = masked_causal_lm_loss(pass2.logits, batch["labels_stage2"])
+        logits = apply_plan_token_logit_delta(
+            logits=pass2.logits,
+            hidden_states=pass2.hidden_states[-1],
+            plan_token_id=self.plan_token_id,
+            plan_token_delta=plan_token_delta,
+        )
+        lm_loss = masked_causal_lm_loss(logits, batch["labels_stage2"])
         return {"loss": lm_loss, "lm_loss": lm_loss.detach()}
 
