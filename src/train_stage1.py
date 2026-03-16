@@ -12,7 +12,6 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.data.dataset import PlanningTokenDataset, collate_fn
-from src.model.aux_decoder import AuxDecoder
 from src.model.planning_model import PlanningQwen
 from src.model.proj import ProjectionModule
 
@@ -44,11 +43,19 @@ def main() -> None:
     parser.add_argument("--model_name", default="Qwen/Qwen2.5-7B")
     parser.add_argument("--proj_type", default="mlp", choices=["linear", "mlp"])
     parser.add_argument("--structural_loss", default="simple", choices=["simple", "contrastive"])
-    parser.add_argument("--lambda_aux", type=float, default=1.0)
     parser.add_argument("--lambda_seg", type=float, default=0.1)
     parser.add_argument("--lambda_depth", type=float, default=0.1)
-    parser.add_argument("--auxdec_layers", type=int, default=2)
-    parser.add_argument("--auxdec_heads", type=int, default=8)
+    parser.add_argument(
+        "--reconstruct_mode",
+        type=str,
+        default="contextual",
+        choices=["contextual", "isolated"],
+        help=(
+            "How to compute reconstruction loss. "
+            "'contextual': two-pass over full sequence with t_i injected at embedding level. "
+            "'isolated': per-step forward passes with only [PLAN]+t_i as prefix."
+        ),
+    )
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--per_device_batch_size", type=int, default=2)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
@@ -59,6 +66,12 @@ def main() -> None:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--presplit_data", action="store_true")
+    parser.add_argument(
+        "--max_step_len",
+        type=int,
+        default=256,
+        help="Maximum number of tokens per reasoning step in isolated reconstruction mode.",
+    )
     parser.add_argument("--local_rank", type=int, default=None)
     parser.add_argument("--deepspeed", default=None)
     args = parser.parse_args()
@@ -81,12 +94,6 @@ def main() -> None:
     base_model.to(device)
 
     proj = ProjectionModule(base_model.config.hidden_size, args.proj_type).to(device)
-    aux_decoder = AuxDecoder(
-        hidden_size=base_model.config.hidden_size,
-        vocab_size=base_model.config.vocab_size,
-        n_layers=args.auxdec_layers,
-        n_heads=args.auxdec_heads,
-    ).to(device)
     model = PlanningQwen(
         base_model=base_model,
         proj=proj,
@@ -96,7 +103,6 @@ def main() -> None:
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-        aux_decoder = DDP(aux_decoder, device_ids=[local_rank], find_unused_parameters=True)
 
     train_set = PlanningTokenDataset(
         data_path=args.data_path,
@@ -117,12 +123,11 @@ def main() -> None:
         pin_memory=True,
     )
 
-    trainable_params = list(model.parameters()) + list(aux_decoder.parameters())
+    trainable_params = list(model.parameters())
     trainable_params = [p for p in trainable_params if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
 
     model.train()
-    aux_decoder.train()
     step = 0
     for epoch in range(args.num_epochs):
         if sampler is not None:
@@ -131,18 +136,13 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         for batch in loop:
             batch = move_batch(batch, device)
-            outputs = model.module.stage1_forward(  # type: ignore[union-attr]
+            stage1_model = model.module if hasattr(model, "module") else model  # type: ignore[union-attr]
+            outputs = stage1_model.stage1_forward(
                 batch=batch,
-                lambda_aux=args.lambda_aux,
+                reconstruct_mode=args.reconstruct_mode,
                 lambda_seg=args.lambda_seg,
                 lambda_depth=args.lambda_depth,
-                aux_decoder=aux_decoder.module if hasattr(aux_decoder, "module") else aux_decoder,
-            ) if hasattr(model, "module") else model.stage1_forward(
-                batch=batch,
-                lambda_aux=args.lambda_aux,
-                lambda_seg=args.lambda_seg,
-                lambda_depth=args.lambda_depth,
-                aux_decoder=aux_decoder,
+                max_step_len=args.max_step_len,
             )
 
             (outputs["loss"] / args.gradient_accumulation_steps).backward()
@@ -156,15 +156,13 @@ def main() -> None:
     if rank == 0:
         os.makedirs(args.output_dir, exist_ok=True)
         model_to_save = model.module if hasattr(model, "module") else model
-        aux_to_save = aux_decoder.module if hasattr(aux_decoder, "module") else aux_decoder
         torch.save(model_to_save.proj.state_dict(), os.path.join(args.output_dir, "proj.pt"))
         torch.save(
             {
-                "aux_decoder": aux_to_save.state_dict(),
                 "segment_head": model_to_save.segment_head.state_dict(),
                 "depth_head": model_to_save.depth_head.state_dict(),
             },
-            os.path.join(args.output_dir, "aux_heads.pt"),
+            os.path.join(args.output_dir, "structural_heads.pt"),
         )
         with open(os.path.join(args.output_dir, "train_args.json"), "w", encoding="utf-8") as f:
             json.dump(vars(args), f, indent=2)

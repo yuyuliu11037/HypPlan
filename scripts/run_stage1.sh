@@ -7,12 +7,11 @@ deepspeed --num_gpus=4 --module src.train_stage1 \
   --model_name Qwen/Qwen2.5-7B \
   --proj_type mlp \
   --structural_loss simple \
-  --lambda_aux 1.0 \
   --lambda_seg 0.1 \
   --lambda_depth 0.1 \
-  --auxdec_layers 2 \
-  --auxdec_heads 8 \
+  --reconstruct_mode contextual \
   --max_seq_len 2048 \
+  --max_step_len 256 \
   --per_device_batch_size 2 \
   --gradient_accumulation_steps 8 \
   --num_epochs 3 \

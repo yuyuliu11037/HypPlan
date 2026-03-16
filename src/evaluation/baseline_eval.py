@@ -8,6 +8,7 @@ from collections import defaultdict
 import torch
 import torch.distributed as dist
 from datasets import load_dataset
+from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.evaluation.math_grading import extract_final_answer, grade_answer
@@ -96,6 +97,7 @@ def main() -> None:
     parser.add_argument("--local_eval_path", default=None)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=1024)
+    parser.add_argument("--lora_adapter_path", default=None)
     parser.add_argument("--output_file", required=True)
     args = parser.parse_args()
 
@@ -103,11 +105,16 @@ def main() -> None:
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
+    base = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         trust_remote_code=True,
-    ).to(device)
+    )
+    if args.lora_adapter_path:
+        model = PeftModel.from_pretrained(base, args.lora_adapter_path)
+    else:
+        model = base
+    model = model.to(device)
     model.eval()
 
     if args.local_eval_path:

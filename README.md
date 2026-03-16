@@ -4,10 +4,10 @@ Two-stage planning-token training pipeline on top of `Qwen/Qwen2.5-7B`.
 
 This repo implements:
 
-- **Stage 1 (warm-up)**: frozen base model + trainable projection (`Proj`), auxiliary decoder, and structural losses.
+- **Stage 1 (warm-up)**: frozen base model + trainable projection (`Proj`) and structural losses, with reconstruction via the frozen LLM itself.
 - **Stage 2 (joint tuning)**: LoRA tuning + `Proj` with two-pass plan injection.
 - **Evaluation**:
-  - vanilla CoT baseline
+  - LoRA-finetuned CoT baseline (same LoRA config as stage 2, trained on first 8000 samples of `prm800k_raw.jsonl`)
   - planning model inference (`autonomous` or `external_controller`)
 
 The full design spec is in `pipeline_spec_v2.md`.
@@ -16,8 +16,9 @@ The full design spec is in `pipeline_spec_v2.md`.
 
 - `src/train_stage1.py`: Stage 1 training entrypoint
 - `src/train_stage2.py`: Stage 2 training entrypoint
+- `src/train_baseline.py`: Baseline LoRA SFT entrypoint (no planning tokens)
 - `src/data/`: preprocessing and dataset
-- `src/model/`: projection module, planning wrapper, auxiliary decoder
+- `src/model/`: projection module and planning wrapper
 - `src/losses/`: structural loss implementations
 - `src/evaluation/`: baseline/planning evaluation and answer grading
 - `configs/`: DeepSpeed and default argument configs
@@ -90,6 +91,8 @@ bash scripts/run_stage2.sh
 
 ### Baseline Evaluation
 
+Fine-tunes the base model with plain LoRA SFT (first 8000 samples of `data/prm800k_raw.jsonl`, same LoRA config as stage 2), then evaluates. This ensures a fair comparison against the planning model.
+
 ```bash
 bash scripts/run_baseline_eval.sh
 ```
@@ -106,7 +109,8 @@ The scripts above wrap these commands:
 
 - Stage 1: `deepspeed --num_gpus=4 --module src.train_stage1 ...`
 - Stage 2: `deepspeed --num_gpus=4 --module src.train_stage2 ...`
-- Baseline eval: `torchrun --nproc_per_node=4 -m src.evaluation.baseline_eval ...`
+- Baseline SFT: `deepspeed --num_gpus=4 --module src.train_baseline ...`
+- Baseline eval: `torchrun --nproc_per_node=4 -m src.evaluation.baseline_eval --lora_adapter_path checkpoints/baseline/lora_adapters ...`
 - Planning eval: `torchrun --nproc_per_node=4 -m src.evaluation.planning_eval ...`
 
 For smoke tests on smaller files, override `--data_path` (for example `data/prm800k_annotated_10.jsonl`) and optionally `--limit`.
@@ -115,12 +119,15 @@ For smoke tests on smaller files, override `--data_path` (for example `data/prm8
 
 - Stage 1 (`--output_dir`, default `checkpoints/stage1`):
   - `proj.pt`
-  - `aux_heads.pt`
+  - `structural_heads.pt`
   - `train_args.json`
 - Stage 2 (`--output_dir`, default `checkpoints/stage2`):
   - `lora_adapters/`
   - `proj.pt`
   - `plan_token_delta.pt`
+  - `train_args.json`
+- Baseline SFT (`--output_dir`, default `checkpoints/baseline`):
+  - `lora_adapters/`
   - `train_args.json`
 - Evaluation:
   - `results/baseline.json`
