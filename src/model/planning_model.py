@@ -293,6 +293,23 @@ class PlanningQwen(nn.Module):
             )
             _, t_flat = self._collect_plan_vectors(pass1.hidden_states[-1], batch["input_ids"])
 
+        # Plan CE loss: train plan_token_delta on pass1 (injection-free) hidden states
+        # to match the distribution the model sees at autonomous inference time.
+        # pass1 is in no_grad so hidden states are detached constants, but gradients
+        # still flow to plan_token_delta through the h @ plan_token_delta dot product.
+        plan_only_labels = torch.where(
+            batch["labels_stage2"] == self.plan_token_id,
+            batch["labels_stage2"],
+            torch.full_like(batch["labels_stage2"], -100),
+        )
+        pass1_logits_adjusted = apply_plan_token_logit_delta(
+            logits=pass1.logits,
+            hidden_states=pass1.hidden_states[-1],
+            plan_token_id=self.plan_token_id,
+            plan_token_delta=plan_token_delta,
+        )
+        plan_ce_loss = masked_causal_lm_loss(pass1_logits_adjusted, plan_only_labels)
+
         injected = input_embeds.clone()
         for b_idx, plan_pos, flat_index in self._flat_plan_indices(batch["input_ids"]):
             if flat_index < t_flat.size(0):
@@ -314,5 +331,6 @@ class PlanningQwen(nn.Module):
             plan_token_delta=plan_token_delta,
         )
         lm_loss = masked_causal_lm_loss(logits, batch["labels_stage2"])
-        return {"loss": lm_loss, "lm_loss": lm_loss.detach()}
+        total_loss = lm_loss + plan_ce_loss
+        return {"loss": total_loss, "lm_loss": lm_loss.detach(), "plan_ce_loss": plan_ce_loss.detach()}
 

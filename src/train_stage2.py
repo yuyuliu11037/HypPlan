@@ -150,7 +150,11 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            loop.set_postfix(loss=float(outputs["loss"].detach().cpu()))
+            loop.set_postfix(
+                loss=float(outputs["loss"].detach().cpu()),
+                lm=float(outputs["lm_loss"].cpu()),
+                plan_ce=float(outputs["plan_ce_loss"].cpu()),
+            )
 
     if rank == 0:
         os.makedirs(args.output_dir, exist_ok=True)

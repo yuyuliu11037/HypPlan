@@ -167,7 +167,7 @@ def autonomous_generate(
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         outputs = model(**inputs, use_cache=True, output_hidden_states=True, return_dict=True)
         past_key_values = outputs.past_key_values
-        next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        next_token = next_token_from_outputs(outputs, plan_token_id, plan_token_delta)
         generated: list[int] = []
         plan_count = 0
 
