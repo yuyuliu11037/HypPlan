@@ -213,3 +213,4 @@ logs/
 runs/
 data/
 checkpoints/
+results/
