@@ -9,8 +9,8 @@ INPUT_PATH = "results/math_samples.jsonl"
 GRADED_PATH = "results/math_graded.jsonl"
 FILTERED_PATH = "results/math_filtered.jsonl"
 
-PASS_RATE_LOW = 0.2
-PASS_RATE_HIGH = 0.8
+PASS_RATE_LOW = 0.1
+PASS_RATE_HIGH = 0.9
 
 
 def grade_problem(record: dict) -> dict:

@@ -10,3 +10,5 @@ sentencepiece>=0.2
 numpy>=1.26
 sympy>=1.12
 deepspeed>=0.15
+wandb>=0.16
+geoopt>=0.5
