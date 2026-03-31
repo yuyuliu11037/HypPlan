@@ -58,6 +58,7 @@ def train_cot_sft(config_path: str, local_rank: int = -1):
         target_modules=cfg["lora_target_modules"],
     )
     model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
     model.to(device)
 
     if distributed:

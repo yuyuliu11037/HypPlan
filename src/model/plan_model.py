@@ -53,6 +53,9 @@ class HypPlanModel(nn.Module):
     def freeze_plan_token_embedding(self):
         """Freeze the [PLAN] token embedding (Stage 3 spec)."""
         embed_weight = self.base_model.get_input_embeddings().weight
+        if not embed_weight.requires_grad:
+            # Embedding already frozen (e.g. by LoRA), nothing to do
+            return
         # Register a hook to zero out the gradient for the [PLAN] token row
         self._plan_embed_hook = embed_weight.register_hook(
             lambda grad: self._zero_plan_grad(grad)

@@ -63,6 +63,10 @@ def train_stage3(config_path: str, local_rank: int = -1):
     for param in model.base_model.base_model.lm_head.parameters():
         param.requires_grad = False
 
+    # Cast proj modules to match base model dtype (bfloat16)
+    model.proj.to(torch.bfloat16)
+    model.project_back.to(torch.bfloat16)
+
     # Enable gradient checkpointing
     model.base_model.gradient_checkpointing_enable()
 
@@ -235,4 +239,6 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--local_rank", type=int, default=-1)
     args = parser.parse_args()
-    train_stage3(args.config, args.local_rank)
+    # torchrun sets LOCAL_RANK env var; CLI arg may not be passed in newer PyTorch
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    train_stage3(args.config, local_rank)

@@ -140,34 +140,27 @@ def generate(base_model, tokenizer, proj, project_back, plan_token_id,
     return text
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--stage3_dir", default="checkpoints/stage3")
-    parser.add_argument("--input", required=True, help="JSONL with 'problem' field")
-    parser.add_argument("--output", required=True, help="Output JSONL")
-    parser.add_argument("--max_new_tokens", type=int, default=2048)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--device", default="cuda")
-    args = parser.parse_args()
-
+def _worker(rank, world_size, args, records):
+    """Worker function for multi-GPU inference."""
+    device = f"cuda:{rank}"
     base_model, tokenizer, proj, project_back, plan_token_id = load_model(
-        args.config, args.stage3_dir, args.device
+        args.config, args.stage3_dir, device
     )
 
-    with open(args.input) as f:
-        records = [json.loads(line) for line in f]
+    # Split data by rank
+    shard = [r for i, r in enumerate(records) if i % world_size == rank]
 
     results = []
-    for i, record in enumerate(records):
+    for i, record in enumerate(shard):
         generation = generate(
             base_model, tokenizer, proj, project_back, plan_token_id,
             record["problem"],
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
-            device=args.device,
+            device=device,
         )
         results.append({
+            "idx": record["_idx"],
             "problem": record["problem"],
             "solution": record.get("solution", ""),
             "generation": generation,
@@ -175,13 +168,73 @@ def main():
             "type": record.get("type", ""),
         })
         if (i + 1) % 50 == 0:
-            print(f"Generated {i+1}/{len(records)}")
+            print(f"[GPU {rank}] Generated {i+1}/{len(shard)}")
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    with open(args.output, "w") as f:
+    # Write shard results to a temp file
+    shard_path = args.output + f".shard{rank}"
+    with open(shard_path, "w") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
-    print(f"Saved {len(results)} generations to {args.output}")
+    print(f"[GPU {rank}] Done — {len(results)} generations")
+
+
+def main():
+    import torch.multiprocessing as mp
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--stage3_dir", default="checkpoints/stage3")
+    parser.add_argument("--input", required=True, help="JSONL with 'problem' field")
+    parser.add_argument("--output", required=True, help="Output JSONL")
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--num_gpus", type=int, default=0,
+                        help="Number of GPUs for parallel inference (0=auto)")
+    args = parser.parse_args()
+
+    with open(args.input) as f:
+        records = [json.loads(line) for line in f]
+
+    # Tag each record with original index for ordering
+    for i, r in enumerate(records):
+        r["_idx"] = i
+
+    num_gpus = args.num_gpus or torch.cuda.device_count()
+
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+
+    if num_gpus <= 1:
+        # Single-GPU fallback
+        args_ns = argparse.Namespace(**vars(args))
+        _worker(0, 1, args_ns, records)
+    else:
+        print(f"Launching {num_gpus}-GPU parallel inference")
+        mp.set_start_method("spawn", force=True)
+        processes = []
+        for rank in range(num_gpus):
+            p = mp.Process(target=_worker, args=(rank, num_gpus, args, records))
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
+
+    # Merge shards in original order
+    all_results = []
+    for rank in range(num_gpus):
+        shard_path = args.output + f".shard{rank}"
+        if os.path.exists(shard_path):
+            with open(shard_path) as f:
+                for line in f:
+                    all_results.append(json.loads(line))
+            os.remove(shard_path)
+
+    all_results.sort(key=lambda r: r["idx"])
+
+    with open(args.output, "w") as f:
+        for r in all_results:
+            del r["idx"]
+            f.write(json.dumps(r) + "\n")
+    print(f"Saved {len(all_results)} generations to {args.output}")
 
 
 if __name__ == "__main__":

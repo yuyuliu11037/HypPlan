@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-NUM_GPUS=${NUM_GPUS:-7}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
+NUM_GPUS=${NUM_GPUS:-5}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5}
 CONFIG=${CONFIG:-configs/default.yaml}
 
 # Avoid NCCL issues with shared machines

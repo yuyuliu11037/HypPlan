@@ -33,8 +33,11 @@ HypPlan/
 │   ├── training/
 │   │   ├── stage1.py              # Warm up Proj
 │   │   ├── stage2.py              # + tree loss
-│   │   └── stage3.py              # LoRA + two-pass
-│   ├── inference/generate.py      # Autoregressive generation with [PLAN] hook
+│   │   ├── stage3.py              # LoRA + two-pass
+│   │   └── cot_sft.py             # CoT-SFT baseline (standard LoRA)
+│   ├── inference/
+│   │   ├── generate.py            # HypPlan generation with [PLAN] hook
+│   │   └── generate_cot_sft.py    # Baseline generation (no planning)
 │   └── eval/evaluate.py           # Accuracy by level and type
 ├── scripts/                       # Shell launchers for each stage
 └── results/                       # Data files (math_filtered.jsonl, reasoning_trees.jsonl)
@@ -81,6 +84,29 @@ Override defaults with environment variables:
 ```bash
 NUM_GPUS=4 CONFIG=configs/custom.yaml bash scripts/run_stage1.sh
 ```
+
+## CoT-SFT Baseline
+
+A standard LoRA fine-tuning baseline on the same correct generations, same compute budget, no planning tokens. Used to isolate the effect of HypPlan's hyperbolic planning machinery.
+
+```bash
+# Train
+bash scripts/run_cot_sft.sh
+
+# Inference (multi-GPU, respects CUDA_VISIBLE_DEVICES)
+CUDA_VISIBLE_DEVICES=1,2,3,4,5 python -m src.inference.generate_cot_sft \
+    --checkpoint_dir checkpoints/cot_sft \
+    --input results/math_filtered.jsonl \
+    --output results/eval/cot_sft_generations.jsonl \
+    --num_gpus 5
+
+# Evaluate
+python -m src.eval.evaluate \
+    --input results/eval/cot_sft_generations.jsonl \
+    --output results/eval/cot_sft_metrics.json
+```
+
+The baseline uses identical LoRA config (r=16, alpha=32, same target modules, lr, epochs) so the only difference is the absence of `[PLAN]` tokens and hyperbolic planning vectors.
 
 ## Evaluation
 
