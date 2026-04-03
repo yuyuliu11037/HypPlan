@@ -10,52 +10,44 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_cosine_schedule_with_warmup
 
-from src.data.dataset_stage1 import Stage1Dataset, collate_stage1
-from src.model.plan_model import HypPlanModel
+from src.dataset import MathDataset, collate_fn
+from src.model import HypPlanModel
 
 
-def train_stage1(config_path: str, local_rank: int = -1):
+def train_stage1(config_path: str):
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    # Distributed setup — torchrun sets LOCAL_RANK env var
-    if local_rank < 0:
-        local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    # Distributed setup
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
     distributed = local_rank >= 0
     if distributed:
         torch.cuda.set_device(local_rank)
         torch.distributed.init_process_group(backend="nccl")
         device = torch.device(f"cuda:{local_rank}")
-        world_size = torch.distributed.get_world_size()
         rank = torch.distributed.get_rank()
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        world_size = 1
         rank = 0
 
     is_main = rank == 0
 
-    # Build model on CPU, then move to the correct GPU
+    # Build model
     model = HypPlanModel(config)
     model.freeze_base_model()
     model.to(torch.bfloat16).to(device)
 
     if distributed:
-        # Only wrap trainable modules in DDP
         model.proj = torch.nn.parallel.DistributedDataParallel(
             model.proj, device_ids=[local_rank]
         )
-        model.project_back = torch.nn.parallel.DistributedDataParallel(
-            model.project_back, device_ids=[local_rank]
-        )
 
     # Dataset
-    dataset = Stage1Dataset(
-        data_path=config["data"]["math_filtered"],
+    dataset = MathDataset(
         tokenizer=model.tokenizer,
+        split="train",
         max_seq_len=config["data"]["max_seq_len"],
-        step_delimiter=config["data"]["step_delimiter"],
-        insert_plan_token=False,
+        configs=config["data"]["configs"],
     )
 
     sampler = DistributedSampler(dataset, shuffle=True) if distributed else None
@@ -64,14 +56,14 @@ def train_stage1(config_path: str, local_rank: int = -1):
         batch_size=config["stage1"]["batch_size"],
         sampler=sampler,
         shuffle=(sampler is None),
-        collate_fn=collate_stage1,
+        collate_fn=collate_fn,
         num_workers=4,
         pin_memory=True,
         drop_last=True,
     )
 
-    # Optimizer — only Proj and ProjectBack parameters
-    trainable_params = list(model.proj.parameters()) + list(model.project_back.parameters())
+    # Optimizer
+    trainable_params = list(model.proj.parameters())
     optimizer = AdamW(trainable_params, lr=config["stage1"]["lr"], weight_decay=0.01)
 
     grad_accum = config["stage1"]["grad_accum"]
@@ -88,7 +80,6 @@ def train_stage1(config_path: str, local_rank: int = -1):
     # Training loop
     model.base_model.eval()
     model.proj.train()
-    model.project_back.train()
 
     global_step = 0
     for epoch in range(epochs):
@@ -138,12 +129,10 @@ def train_stage1(config_path: str, local_rank: int = -1):
         output_dir = config["stage1"]["output_dir"]
         os.makedirs(output_dir, exist_ok=True)
         proj_state = model.proj.module.state_dict() if distributed else model.proj.state_dict()
-        pb_state = model.project_back.module.state_dict() if distributed else model.project_back.state_dict()
         torch.save({
             "proj": proj_state,
-            "project_back": pb_state,
-            "optimizer": optimizer.state_dict(),
         }, os.path.join(output_dir, "checkpoint.pt"))
+        model.tokenizer.save_pretrained(output_dir)
         print(f"Saved Stage 1 checkpoint to {output_dir}")
 
     if distributed:
@@ -153,6 +142,5 @@ def train_stage1(config_path: str, local_rank: int = -1):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--local_rank", type=int, default=-1)
     args = parser.parse_args()
-    train_stage1(args.config, args.local_rank)
+    train_stage1(args.config)

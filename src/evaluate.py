@@ -6,7 +6,7 @@ import json
 import os
 from collections import defaultdict
 
-from src.data.utils import extract_boxed_answer, normalize_answer
+from src.utils import extract_boxed_answer, normalize_answer
 
 
 def is_correct(predicted: str | None, target: str | None) -> bool:
@@ -17,13 +17,7 @@ def is_correct(predicted: str | None, target: str | None) -> bool:
 
 
 def evaluate(generations_path: str) -> dict:
-    """Evaluate generated solutions.
-
-    Args:
-        generations_path: JSONL with 'generation', 'solution', 'level', 'type' fields.
-    Returns:
-        dict with accuracy metrics.
-    """
+    """Evaluate generated solutions."""
     with open(generations_path) as f:
         records = [json.loads(line) for line in f]
 
@@ -56,10 +50,10 @@ def evaluate(generations_path: str) -> dict:
         "by_type": {},
     }
 
-    for level in sorted(by_level.keys()):
+    for level in sorted(by_level.keys(), key=str):
         stats = by_level[level]
         acc = stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
-        results["by_level"][level] = {
+        results["by_level"][str(level)] = {
             "accuracy": acc,
             "correct": stats["correct"],
             "total": stats["total"],
@@ -85,7 +79,7 @@ def print_results(results: dict):
 
     print(f"\nBy Level:")
     for level, stats in results["by_level"].items():
-        print(f"  {level}: {stats['accuracy']:.4f} ({stats['correct']}/{stats['total']})")
+        print(f"  Level {level}: {stats['accuracy']:.4f} ({stats['correct']}/{stats['total']})")
 
     print(f"\nBy Type:")
     for ptype, stats in results["by_type"].items():

@@ -1,4 +1,4 @@
-"""Inference for CoT-SFT baseline: standard generation without [PLAN] hook."""
+"""Baseline inference: plain Qwen2.5-7B generation (frozen, no planning)."""
 from __future__ import annotations
 
 import argparse
@@ -6,49 +6,33 @@ import json
 import os
 
 import torch
+import torch.multiprocessing as mp
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
 
 
-def load_model(config_path: str, checkpoint_dir: str, device: str = "cuda"):
-    """Load CoT-SFT model (base + LoRA adapters)."""
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
+def load_model(config: dict, device: str = "cuda"):
+    """Load the frozen base model."""
     model_name = config["model"]["base_model"]
 
-    # Load tokenizer
-    tokenizer_path = os.path.join(checkpoint_dir, "tokenizer")
-    if os.path.exists(tokenizer_path):
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load base model + merge LoRA
-    base_model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
-
-    lora_path = os.path.join(checkpoint_dir, "lora_adapters")
-    if os.path.exists(lora_path):
-        base_model = PeftModel.from_pretrained(base_model, lora_path)
-        base_model = base_model.merge_and_unload()
-
-    base_model = base_model.to(device).eval()
-    return base_model, tokenizer
+    model = model.to(device).eval()
+    return model, tokenizer
 
 
 @torch.no_grad()
 def generate(model, tokenizer, problem: str, max_new_tokens: int = 2048,
              temperature: float = 0.0, device: str = "cuda") -> str:
-    """Standard autoregressive generation (no planning tokens)."""
+    """Standard autoregressive generation with the base model."""
     input_ids = tokenizer.encode(problem, return_tensors="pt").to(device)
 
     if temperature <= 0:
@@ -67,17 +51,15 @@ def generate(model, tokenizer, problem: str, max_new_tokens: int = 2048,
             pad_token_id=tokenizer.pad_token_id,
         )
 
-    # Decode only the generated part
     generated_ids = output_ids[0, input_ids.size(1):]
     return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
 
-def _worker(rank, world_size, args, records):
-    """Worker function for multi-GPU inference."""
+def _worker(rank, world_size, config, args, records):
+    """Worker for multi-GPU inference."""
     device = f"cuda:{rank}"
-    model, tokenizer = load_model(args.config, args.checkpoint_dir, device)
+    model, tokenizer = load_model(config, device)
 
-    # Split data by rank
     shard = [r for i, r in enumerate(records) if i % world_size == rank]
 
     results = []
@@ -91,7 +73,7 @@ def _worker(rank, world_size, args, records):
         results.append({
             "idx": record["_idx"],
             "problem": record["problem"],
-            "solution": record.get("solution", ""),
+            "solution": record["solution"],
             "generation": generation,
             "level": record.get("level", ""),
             "type": record.get("type", ""),
@@ -99,7 +81,6 @@ def _worker(rank, world_size, args, records):
         if (i + 1) % 50 == 0:
             print(f"[GPU {rank}] Generated {i+1}/{len(shard)}")
 
-    # Write shard results to a temp file
     shard_path = args.output + f".shard{rank}"
     with open(shard_path, "w") as f:
         for r in results:
@@ -108,44 +89,54 @@ def _worker(rank, world_size, args, records):
 
 
 def main():
-    import torch.multiprocessing as mp
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--checkpoint_dir", default="checkpoints/cot_sft")
-    parser.add_argument("--input", required=True, help="JSONL with 'problem' field")
     parser.add_argument("--output", required=True, help="Output JSONL")
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--num_gpus", type=int, default=0,
-                        help="Number of GPUs for parallel inference (0=auto)")
+    parser.add_argument("--num_gpus", type=int, default=0)
+    parser.add_argument("--max_samples", type=int, default=0,
+                        help="Max test samples (0=use config eval_samples)")
     args = parser.parse_args()
 
-    with open(args.input) as f:
-        records = [json.loads(line) for line in f]
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
 
-    # Tag each record with original index for ordering
-    for i, r in enumerate(records):
-        r["_idx"] = i
+    # Load test data
+    from datasets import load_dataset, concatenate_datasets
+    all_ds = []
+    for cfg_name in config["data"]["configs"]:
+        ds = load_dataset("EleutherAI/hendrycks_math", cfg_name, split="test")
+        all_ds.append(ds)
+    test_data = concatenate_datasets(all_ds)
+
+    max_samples = args.max_samples or config["data"].get("eval_samples", len(test_data))
+    if max_samples < len(test_data):
+        test_data = test_data.shuffle(seed=42).select(range(max_samples))
+
+    records = []
+    for i in range(len(test_data)):
+        item = test_data[i]
+        item["_idx"] = i
+        records.append(item)
 
     num_gpus = args.num_gpus or torch.cuda.device_count()
-
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     if num_gpus <= 1:
-        _worker(0, 1, args, records)
+        _worker(0, 1, config, args, records)
     else:
         print(f"Launching {num_gpus}-GPU parallel inference")
         mp.set_start_method("spawn", force=True)
         processes = []
         for rank in range(num_gpus):
-            p = mp.Process(target=_worker, args=(rank, num_gpus, args, records))
+            p = mp.Process(target=_worker, args=(rank, num_gpus, config, args, records))
             p.start()
             processes.append(p)
         for p in processes:
             p.join()
 
-    # Merge shards in original order
+    # Merge shards
     all_results = []
     for rank in range(num_gpus):
         shard_path = args.output + f".shard{rank}"
@@ -156,7 +147,6 @@ def main():
             os.remove(shard_path)
 
     all_results.sort(key=lambda r: r["idx"])
-
     with open(args.output, "w") as f:
         for r in all_results:
             del r["idx"]

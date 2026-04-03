@@ -1,14 +1,14 @@
 model:
   base_model: "Qwen/Qwen2.5-7B"
-  hyp_dim: 64
   proj_hidden_dims: [2048]
   plan_token: "[PLAN]"
 
 data:
-  math_filtered: "results/math_filtered.jsonl"
-  reasoning_trees: "results/reasoning_trees.jsonl"
-  step_delimiter: "\n\n"
+  dataset: "EleutherAI/hendrycks_math"
+  configs: ["algebra", "counting_and_probability", "geometry",
+            "intermediate_algebra", "number_theory", "prealgebra", "precalculus"]
   max_seq_len: 2048
+  eval_samples: 500
 
 stage1:
   lr: 1.0e-4
@@ -18,41 +18,7 @@ stage1:
   warmup_ratio: 0.05
   output_dir: "checkpoints/stage1"
 
-stage2:
-  lr: 1.0e-4
-  epochs: 3
-  batch_size: 1
-  grad_accum: 16
-  tree_loss_weight: 1.0
-  c_init: 1.0
-  num_pairs: 256
-  warmup_ratio: 0.05
-  output_dir: "checkpoints/stage2"
-
-stage3:
-  lr: 2.0e-5
-  epochs: 3
-  batch_size: 2
-  grad_accum: 8
-  lora_r: 16
-  lora_alpha: 32
-  lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
-  warmup_ratio: 0.05
-  output_dir: "checkpoints/stage3"
-
-cot_sft:
-  lr: 2.0e-5
-  epochs: 3
-  batch_size: 2
-  grad_accum: 8
-  lora_r: 16
-  lora_alpha: 32
-  lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
-  warmup_ratio: 0.05
-  output_dir: "checkpoints/cot_sft"
-
 eval:
-  batch_size: 8
   max_new_tokens: 2048
   temperature: 0.0
   output_dir: "results/eval"
