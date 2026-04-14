@@ -1,0 +1,24 @@
+model:
+  base_model: "meta-llama/Llama-3.1-8B-Instruct"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_data: "data/24_train_sft3k_v2.jsonl"
+  test_data: "data/24_test.jsonl"
+  max_seq_len: 256
+
+training:
+  lr: 2.0e-4
+  epochs: 3
+  batch_size: 4
+  grad_accum: 4
+  warmup_ratio: 0.05
+  output_dir: "checkpoints/sft_24_v2"
+  log_dir: "logs"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  output_dir: "results/24_sft"

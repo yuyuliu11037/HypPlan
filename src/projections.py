@@ -4,7 +4,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.hyperbolic import exp_map_origin
+from src.hyperbolic import EPS, exp_map_origin
 
 
 class ProjMLP(nn.Module):
@@ -17,8 +17,10 @@ class ProjMLP(nn.Module):
     inserted into the embedding sequence as a virtual planning token.
     """
 
-    def __init__(self, hidden_dim: int, proj_hidden_dims: list[int]):
+    def __init__(self, hidden_dim: int, proj_hidden_dims: list[int],
+                 target_norm: float = 1.0):
         super().__init__()
+        self.target_norm = target_norm
         layers = []
         in_dim = hidden_dim
         for out_dim in proj_hidden_dims:
@@ -34,8 +36,10 @@ class ProjMLP(nn.Module):
             h: (..., hidden_dim) LLM hidden state.
         Returns:
             t: (..., hidden_dim+1) point on the hyperboloid.
-            z: (..., hidden_dim) tangent vector at origin (same dim as embeddings).
+            z: (..., hidden_dim) tangent vector rescaled to target_norm for embedding use.
         """
-        z = self.mlp(h)
-        t = exp_map_origin(z)
+        z_raw = self.mlp(h)
+        t = exp_map_origin(z_raw)
+        z_norm = z_raw.norm(dim=-1, keepdim=True).clamp(min=EPS)
+        z = z_raw * (self.target_norm / z_norm)
         return t, z

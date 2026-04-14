@@ -21,11 +21,7 @@ class HypPlanModel(nn.Module):
         model_name = config["model"]["base_model"]
         proj_hidden_dims = config["model"]["proj_hidden_dims"]
 
-        # Load tokenizer and add [PLAN] token
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        plan_token = config["model"]["plan_token"]
-        num_added = self.tokenizer.add_special_tokens({"additional_special_tokens": [plan_token]})
-        self.plan_token_id = self.tokenizer.convert_tokens_to_ids(plan_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -36,13 +32,12 @@ class HypPlanModel(nn.Module):
             trust_remote_code=True,
             attn_implementation="flash_attention_2",
         )
-        if num_added > 0:
-            self.base_model.resize_token_embeddings(len(self.tokenizer))
 
         hidden_dim = self.base_model.config.hidden_size
 
         # Projection: hidden_dim -> hidden_dim (tangent vector usable as virtual token)
-        self.proj = ProjMLP(hidden_dim, proj_hidden_dims)
+        target_norm = config["model"].get("plan_vector_scale", 1.0)
+        self.proj = ProjMLP(hidden_dim, proj_hidden_dims, target_norm=target_norm)
 
     def freeze_base_model(self):
         """Freeze all base LLM parameters."""
@@ -77,126 +72,98 @@ class HypPlanModel(nn.Module):
         t, z = self.proj(h)
         return t, z, valid_mask
 
-    def insert_plan_vectors(self, input_ids, z_list, inject_positions, valid_mask,
-                            attention_mask=None, labels=None):
-        """Build embeddings with planning vectors inserted as virtual tokens, then run LLM.
+    def forward_stage1(self, input_ids, attention_mask,
+                       boundary_positions, grad_accum_denom: float = 1.0):
+        """Stage 1 per-step training loss.
 
-        For each valid step, inserts z as a new token embedding at the inject position.
-        This shifts subsequent tokens right. Labels and attention mask are adjusted
-        accordingly (the inserted virtual token gets label=-100 and attention=1).
+        For each sample and each valid step i, builds the truncated sequence
+        [x, r_{<i}, t_i, r_i] as embeddings, forwards through the frozen LLM,
+        and computes cross-entropy on r_i token positions. The loss is scaled
+        by 1/grad_accum_denom and backward is called immediately so that the
+        computation graph is freed between steps (memory-bounded).
+
+        Step token ranges are derived from boundary_positions:
+          r_i = input_ids[bp[i]+1 : bp[i+1]+1]  for i < K-1
+          r_i = input_ids[bp[i]+1 : real_len]    for i == K-1 (last step)
+
+        Only ProjMLP parameters accumulate gradients (base LLM is frozen).
 
         Args:
-            input_ids: (B, L) token IDs.
-            z_list: (B, num_steps, H) tangent vectors to insert.
-            inject_positions: (B, num_steps) positions to insert before (-1 = skip).
-            valid_mask: (B, num_steps) which steps are valid.
-            attention_mask: (B, L) attention mask.
-            labels: (B, L) labels with -100 for masked positions.
-        Returns:
-            logits: (B, L', vocab_size) from LLM forward.
-            new_labels: (B, L') adjusted labels with -100 at inserted positions.
-        """
-        base_embeds = self.base_model.get_input_embeddings()(input_ids)  # (B, L, H)
-        B, L, H = base_embeds.shape
-
-        new_embeds_list = []
-        new_attn_list = []
-        new_labels_list = []
-
-        for b in range(B):
-            embed_b = base_embeds[b]  # (L, H)
-            attn_b = attention_mask[b] if attention_mask is not None else torch.ones(L, device=embed_b.device)
-            label_b = labels[b] if labels is not None else torch.full((L,), -100, dtype=torch.long, device=embed_b.device)
-
-            # Collect valid insert positions for this sample, sorted ascending
-            positions = []
-            vectors = []
-            for s in range(inject_positions.size(1)):
-                if valid_mask[b, s]:
-                    pos = inject_positions[b, s].item()
-                    if 0 <= pos <= L:
-                        positions.append(pos)
-                        vectors.append(z_list[b, s])  # (H,)
-
-            if not positions:
-                new_embeds_list.append(embed_b)
-                new_attn_list.append(attn_b)
-                new_labels_list.append(label_b)
-                continue
-
-            # Sort by position (ascending), insert from back to front to keep indices stable
-            paired = sorted(zip(positions, vectors), key=lambda x: x[0])
-
-            chunks_embed = []
-            chunks_attn = []
-            chunks_label = []
-            prev = 0
-            for pos, vec in paired:
-                # Tokens before this insert point
-                if pos > prev:
-                    chunks_embed.append(embed_b[prev:pos])
-                    chunks_attn.append(attn_b[prev:pos])
-                    chunks_label.append(label_b[prev:pos])
-                # Insert virtual token
-                chunks_embed.append(vec.unsqueeze(0))
-                chunks_attn.append(torch.ones(1, device=embed_b.device, dtype=attn_b.dtype))
-                chunks_label.append(torch.full((1,), -100, dtype=torch.long, device=embed_b.device))
-                prev = pos
-
-            # Remaining tokens
-            if prev < L:
-                chunks_embed.append(embed_b[prev:])
-                chunks_attn.append(attn_b[prev:])
-                chunks_label.append(label_b[prev:])
-
-            new_embeds_list.append(torch.cat(chunks_embed, dim=0))
-            new_attn_list.append(torch.cat(chunks_attn, dim=0))
-            new_labels_list.append(torch.cat(chunks_label, dim=0))
-
-        # Pad to same length
-        max_new_len = max(e.size(0) for e in new_embeds_list)
-        padded_embeds = torch.zeros(B, max_new_len, H, device=base_embeds.device, dtype=base_embeds.dtype)
-        padded_attn = torch.zeros(B, max_new_len, device=base_embeds.device, dtype=attention_mask.dtype if attention_mask is not None else torch.long)
-        padded_labels = torch.full((B, max_new_len), -100, device=base_embeds.device, dtype=torch.long)
-
-        for b in range(B):
-            n = new_embeds_list[b].size(0)
-            padded_embeds[b, :n] = new_embeds_list[b]
-            padded_attn[b, :n] = new_attn_list[b]
-            padded_labels[b, :n] = new_labels_list[b]
-
-        outputs = self.base_model(
-            inputs_embeds=padded_embeds,
-            attention_mask=padded_attn,
-            output_hidden_states=False,
-        )
-        return outputs.logits, padded_labels
-
-    def forward_stage1(self, input_ids, attention_mask, labels,
-                       boundary_positions, inject_positions):
-        """Stage 1 forward: frozen LLM, train Proj only.
+            input_ids: (B, L) original token IDs.
+            attention_mask: (B, L)
+            boundary_positions: (B, num_steps) with -1 padding. boundary_positions[b, i]
+                is the last token index before step i's content starts.
+            grad_accum_denom: scale factor applied before backward.
 
         Returns:
-            loss: scalar LM loss on step tokens.
-            t: (B, num_steps, H+1) hyperboloid points.
+            avg_loss: float — mean of per-step scalar losses.
+            z_norm_mean: float — mean L2 norm of ProjMLP outputs across all steps.
         """
-        # Pass 1: collect hidden states (no grad through LLM)
-        hidden_states = self.get_hidden_states(input_ids, attention_mask)
+        # Pass 1: hidden states from full sequence (no grad)
+        hidden_states = self.get_hidden_states(input_ids, attention_mask)  # (B, L, H)
 
-        # Compute planning vectors
-        t, z, valid_mask = self.compute_plan_vectors(hidden_states, boundary_positions)
+        embed_table = self.base_model.get_input_embeddings()
+        total_loss = 0.0
+        total_steps = 0
+        z_norms: list[float] = []
 
-        # Pass 2: insert planning vectors as virtual tokens and compute loss
-        logits, new_labels = self.insert_plan_vectors(
-            input_ids, z, inject_positions, valid_mask, attention_mask, labels
-        )
+        B = input_ids.size(0)
+        for b in range(B):
+            valid_bp = boundary_positions[b][boundary_positions[b] >= 0]
+            K = valid_bp.size(0)
+            real_len = attention_mask[b].sum().item()
 
-        # Compute LM loss
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = new_labels[..., 1:].contiguous()
-        loss = nn.functional.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            ignore_index=-100,
-        )
-        return loss, t
+            for i in range(K):
+                bpos = valid_bp[i].item()
+
+                # Derive r_i token range from boundary positions
+                step_start = bpos + 1
+                step_end = valid_bp[i + 1].item() + 1 if i < K - 1 else real_len
+                if step_start >= step_end:
+                    continue
+                step_ids = input_ids[b, step_start:step_end]     # (|r_i|,)
+
+                # Recompute t_i with a fresh graph so backward() below doesn't
+                # invalidate earlier or later iterations.
+                h_i = hidden_states[b, bpos].unsqueeze(0)        # (1, H), detached
+                _, z_i = self.proj(h_i)                          # (1, H), grad-enabled
+                z_norms.append(z_i.detach().float().norm().item())
+
+                # Build [x, r_{<i}, t_i, r_i] as inputs_embeds
+                prefix_ids = input_ids[b, : bpos + 1]
+                prefix_embeds = embed_table(prefix_ids)          # (prefix_len, H)
+                step_embeds = embed_table(step_ids)              # (|r_i|, H)
+                prefix_len = prefix_embeds.size(0)
+                s_len = step_embeds.size(0)
+
+                full_embeds = torch.cat(
+                    [prefix_embeds, z_i, step_embeds], dim=0
+                ).unsqueeze(0)                                    # (1, L_i, H)
+                L_i = full_embeds.size(1)
+
+                # Labels: predict r_i tokens after t_i
+                full_labels = torch.full(
+                    (1, L_i), -100, dtype=torch.long, device=input_ids.device
+                )
+                full_labels[0, prefix_len + 1 : prefix_len + 1 + s_len] = step_ids
+
+                outputs = self.base_model(inputs_embeds=full_embeds)
+                logits = outputs.logits                           # (1, L_i, V)
+
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = full_labels[:, 1:].contiguous()
+                loss_i = nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+
+                # Backward immediately — frees the graph so we can iterate.
+                (loss_i / grad_accum_denom).backward()
+
+                total_loss += loss_i.item()
+                total_steps += 1
+
+        avg_loss = total_loss / total_steps
+        z_norm_mean = sum(z_norms) / len(z_norms)
+        return avg_loss, z_norm_mean

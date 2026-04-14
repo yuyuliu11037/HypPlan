@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+from datetime import datetime
 
 import torch
 import yaml
@@ -72,10 +74,34 @@ def train_stage1(config_path: str):
     warmup_steps = int(total_steps * config["stage1"].get("warmup_ratio", 0.05))
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
+    # Logging setup (no-op on non-main ranks)
+    log_file = None
+
+    def log_event(event):
+        pass
+
     if is_main:
         print(f"Stage 1: {len(dataset)} samples, {len(loader)} batches/epoch")
         print(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
         print(f"Total steps: {total_steps}, warmup: {warmup_steps}")
+
+        log_dir = config["stage1"].get("log_dir", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "stage1_train.jsonl")
+        log_file = open(log_path, "a")
+
+        def log_event(event):
+            event["timestamp"] = datetime.now().isoformat()
+            log_file.write(json.dumps(event) + "\n")
+            log_file.flush()
+
+        log_event({
+            "event": "train_start",
+            "num_samples": len(dataset),
+            "batches_per_epoch": len(loader),
+            "total_steps": total_steps,
+            "warmup_steps": warmup_steps,
+        })
 
     # Training loop
     model.base_model.eval()
@@ -92,37 +118,66 @@ def train_stage1(config_path: str):
         for batch_idx, batch in enumerate(loader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
             boundary_pos = batch["boundary_positions"].to(device)
-            inject_pos = batch["inject_positions"].to(device)
 
-            loss, _ = model.forward_stage1(
-                input_ids, attention_mask, labels, boundary_pos, inject_pos
-            )
-
-            loss = loss / grad_accum
-            loss.backward()
+            # forward_stage1 runs per-step forwards and calls backward internally
+            # (scaled by 1/grad_accum), so we must NOT call loss.backward() here.
+            # Under DDP, disable per-backward sync; we'll all-reduce once per
+            # optimizer step below.
+            if distributed:
+                with model.proj.no_sync():
+                    avg_loss, z_norm_mean = model.forward_stage1(
+                        input_ids, attention_mask, boundary_pos,
+                        grad_accum_denom=grad_accum,
+                    )
+            else:
+                avg_loss, z_norm_mean = model.forward_stage1(
+                    input_ids, attention_mask, boundary_pos,
+                    grad_accum_denom=grad_accum,
+                )
 
             if (batch_idx + 1) % grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                # Manually all-reduce ProjMLP gradients once per optimizer step.
+                if distributed:
+                    for p in trainable_params:
+                        if p.grad is not None:
+                            torch.distributed.all_reduce(
+                                p.grad, op=torch.distributed.ReduceOp.AVG
+                            )
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 
                 if is_main and global_step % 50 == 0:
+                    cur_lr = scheduler.get_last_lr()[0]
                     print(
                         f"  Epoch {epoch+1}/{epochs} | Step {global_step}/{total_steps} | "
-                        f"Loss: {loss.item() * grad_accum:.4f} | "
-                        f"LR: {scheduler.get_last_lr()[0]:.2e}"
+                        f"Loss: {avg_loss:.4f} | "
+                        f"LR: {cur_lr:.2e}"
                     )
+                    log_event({
+                        "event": "step",
+                        "epoch": epoch + 1,
+                        "step": global_step,
+                        "loss": avg_loss,
+                        "lr": cur_lr,
+                        "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm),
+                        "z_norm_mean": z_norm_mean,
+                    })
 
-            epoch_loss += loss.item() * grad_accum
+            epoch_loss += avg_loss
             num_batches += 1
 
-        avg_loss = epoch_loss / max(num_batches, 1)
+        avg_loss = epoch_loss / num_batches
         if is_main:
             print(f"Epoch {epoch+1}/{epochs} — Avg Loss: {avg_loss:.4f}")
+            log_event({
+                "event": "epoch_end",
+                "epoch": epoch + 1,
+                "avg_loss": avg_loss,
+            })
 
     # Save checkpoint
     if is_main:
@@ -134,6 +189,9 @@ def train_stage1(config_path: str):
         }, os.path.join(output_dir, "checkpoint.pt"))
         model.tokenizer.save_pretrained(output_dir)
         print(f"Saved Stage 1 checkpoint to {output_dir}")
+
+    if is_main and log_file is not None:
+        log_file.close()
 
     if distributed:
         torch.distributed.destroy_process_group()

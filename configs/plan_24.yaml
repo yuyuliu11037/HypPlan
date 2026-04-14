@@ -1,0 +1,23 @@
+model:
+  base_model: "checkpoints/sft_24_v2_merged"
+  proj_hidden_dims: [2048]
+  plan_vector_scale: 1.0
+
+data:
+  train_data: "data/24_train_plan5k.jsonl"
+  test_data: "data/24_test.jsonl"
+  max_seq_len: 256
+
+training:
+  lr: 1.0e-4
+  epochs: 3
+  batch_size: 1
+  grad_accum: 16
+  warmup_ratio: 0.05
+  output_dir: "checkpoints/plan_24"
+  log_dir: "logs"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  output_dir: "results/24_plan"

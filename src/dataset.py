@@ -60,28 +60,22 @@ class MathDataset(Dataset):
         """Tokenize problem + steps with step boundary tracking.
 
         Format: <problem>\n\n<step1>. <step2>. ... <stepN><eos>
-        Labels: -100 for problem tokens, real IDs for solution tokens.
         """
         problem_ids = self.tokenizer.encode(problem, add_special_tokens=False)
         sep_ids = self.tokenizer.encode("\n\n", add_special_tokens=False)
 
         all_ids = list(problem_ids) + list(sep_ids)
         boundary_positions = []
-        inject_positions = []
 
         for i, step in enumerate(steps):
             if i > 0:
-                # Re-insert the period + space that was removed by split
                 dot_ids = self.tokenizer.encode(". ", add_special_tokens=False)
                 all_ids.extend(dot_ids)
 
-            # Boundary: last token before this step's content
             boundary_positions.append(len(all_ids) - 1)
 
-            step_start = len(all_ids)
             step_ids = self.tokenizer.encode(step, add_special_tokens=False)
             all_ids.extend(step_ids)
-            inject_positions.append(step_start)
 
         # Add EOS
         if self.tokenizer.eos_token_id is not None:
@@ -91,25 +85,13 @@ class MathDataset(Dataset):
         if len(all_ids) > self.max_seq_len:
             all_ids = all_ids[:self.max_seq_len]
 
-        # Labels: -100 for problem + separator, real IDs for solution
-        solution_start = len(problem_ids) + len(sep_ids)
-        labels = [-100] * len(all_ids)
-        for pos in range(solution_start, len(all_ids)):
-            labels[pos] = all_ids[pos]
-
         # Filter positions within truncated sequence
         boundary_positions = [p for p in boundary_positions if p < len(all_ids)]
-        inject_positions = [p for p in inject_positions if p < len(all_ids)]
-        num_valid = min(len(boundary_positions), len(inject_positions))
-        boundary_positions = boundary_positions[:num_valid]
-        inject_positions = inject_positions[:num_valid]
 
         return {
             "input_ids": torch.tensor(all_ids, dtype=torch.long),
             "attention_mask": torch.ones(len(all_ids), dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
             "boundary_positions": torch.tensor(boundary_positions, dtype=torch.long),
-            "inject_positions": torch.tensor(inject_positions, dtype=torch.long),
         }
 
 
@@ -120,9 +102,7 @@ def collate_fn(batch: list[dict]) -> dict:
 
     input_ids = []
     attention_mask = []
-    labels = []
     boundary_positions = []
-    inject_positions = []
 
     for b in batch:
         L = b["input_ids"].size(0)
@@ -132,20 +112,13 @@ def collate_fn(batch: list[dict]) -> dict:
 
         input_ids.append(torch.cat([b["input_ids"], torch.zeros(pad_len, dtype=torch.long)]))
         attention_mask.append(torch.cat([b["attention_mask"], torch.zeros(pad_len, dtype=torch.long)]))
-        labels.append(torch.cat([b["labels"], torch.full((pad_len,), -100, dtype=torch.long)]))
         boundary_positions.append(torch.cat([
             b["boundary_positions"],
-            torch.full((step_pad,), -1, dtype=torch.long),
-        ]))
-        inject_positions.append(torch.cat([
-            b["inject_positions"],
             torch.full((step_pad,), -1, dtype=torch.long),
         ]))
 
     return {
         "input_ids": torch.stack(input_ids),
         "attention_mask": torch.stack(attention_mask),
-        "labels": torch.stack(labels),
         "boundary_positions": torch.stack(boundary_positions),
-        "inject_positions": torch.stack(inject_positions),
     }

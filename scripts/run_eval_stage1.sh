@@ -2,8 +2,10 @@
 # Evaluate Stage 1 model
 set -e
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
-NUM_GPUS=${NUM_GPUS:-6}
+# Prompt for GPU selection
+read -rp "Enter GPU IDs to use (comma-separated, e.g. 0,1,2): " GPU_INPUT
+export CUDA_VISIBLE_DEVICES="$GPU_INPUT"
+NUM_GPUS=$(echo "$GPU_INPUT" | awk -F',' '{print NF}')
 CONFIG=${CONFIG:-configs/default.yaml}
 CHECKPOINT=${CHECKPOINT:-checkpoints/stage1}
 OUTPUT_DIR=results/eval

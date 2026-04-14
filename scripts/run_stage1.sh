@@ -2,8 +2,10 @@
 # Stage 1: Warm up Proj with frozen LLM
 set -euo pipefail
 
-NUM_GPUS=${NUM_GPUS:-6}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
+# Prompt for GPU selection
+read -rp "Enter GPU IDs to use (comma-separated, e.g. 0,1,2): " GPU_INPUT
+export CUDA_VISIBLE_DEVICES="$GPU_INPUT"
+NUM_GPUS=$(echo "$GPU_INPUT" | awk -F',' '{print NF}')
 CONFIG=${CONFIG:-configs/default.yaml}
 
 export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}

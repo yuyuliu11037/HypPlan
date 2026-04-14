@@ -18,7 +18,6 @@ def load_model(config: dict, checkpoint_dir: str, device: str = "cuda"):
     model_name = config["model"]["base_model"]
     proj_hidden_dims = config["model"]["proj_hidden_dims"]
 
-    # Load tokenizer from checkpoint (has [PLAN] token)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -30,13 +29,13 @@ def load_model(config: dict, checkpoint_dir: str, device: str = "cuda"):
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
-    base_model.resize_token_embeddings(len(tokenizer))
     base_model = base_model.to(device).eval()
 
     hidden_dim = base_model.config.hidden_size
 
     # Load projection module
-    proj = ProjMLP(hidden_dim, proj_hidden_dims).to(torch.bfloat16).to(device)
+    target_norm = config["model"].get("plan_vector_scale", 1.0)
+    proj = ProjMLP(hidden_dim, proj_hidden_dims, target_norm=target_norm).to(torch.bfloat16).to(device)
     ckpt = torch.load(
         os.path.join(checkpoint_dir, "checkpoint.pt"),
         map_location=device, weights_only=True,
@@ -50,20 +49,31 @@ def load_model(config: dict, checkpoint_dir: str, device: str = "cuda"):
 @torch.no_grad()
 def generate(base_model, tokenizer, proj,
              problem: str, max_new_tokens: int = 2048, temperature: float = 0.0,
-             device: str = "cuda") -> str:
+             device: str = "cuda", return_plan_vectors: bool = False):
     """Autoregressive generation with planning vector insertion at step boundaries.
 
     When a period token is generated, computes a planning vector z from the hidden
     state and inserts it as a virtual token embedding before the next token.
+
+    If return_plan_vectors is True, returns (text, plan_vectors) where plan_vectors
+    is a list of dicts with keys 'z' (tensor), 'step' (generation step index),
+    and 'context' (text generated up to the boundary).
     """
     input_ids = tokenizer.encode(problem, return_tensors="pt").to(device)
     past_key_values = None
     pending_plan_vector = None
 
     generated_ids = input_ids[0].tolist()
+    prompt_len = input_ids.size(1)
+    plan_vectors = []
 
-    # Precompute period token ID for boundary detection
-    period_token_ids = set(tokenizer.encode(".", add_special_tokens=False))
+    # Boundary detection matching training's split_steps regex: (?<!\d)\.(?=\s)
+    # The tokenizer may merge periods with adjacent whitespace into single tokens
+    # (e.g. ".\n\n" -> token 382), so we check the decoded text rather than token IDs.
+    # We track boundary count on a running decoded string to avoid double-triggering.
+    import re
+    _boundary_re = re.compile(r'(?<!\d)\.\s')
+    prev_boundary_count = 0
 
     for step in range(max_new_tokens):
         if past_key_values is not None:
@@ -102,14 +112,32 @@ def generate(base_model, tokenizer, proj,
 
         generated_ids.append(next_token)
 
-        # Check if this token is a period (step boundary)
-        if next_token in period_token_ids:
+        # Check if a new step boundary appeared in the decoded text.
+        # Only decode the last few tokens for efficiency — boundaries span at most
+        # 2-3 tokens (e.g. preceding char + ".\n\n").
+        tail = tokenizer.decode(generated_ids[max(prompt_len, len(generated_ids) - 5):],
+                                skip_special_tokens=True)
+        cur_boundary_count = len(_boundary_re.findall(tail))
+        if cur_boundary_count > prev_boundary_count:
             _, z = proj(hidden)  # z: (1, H)
             pending_plan_vector = z
+            if return_plan_vectors:
+                context = tokenizer.decode(generated_ids[prompt_len:],
+                                           skip_special_tokens=True)
+                plan_vectors.append({
+                    "z": z.detach().cpu().squeeze(0),  # (H,)
+                    "step": step,
+                    "context": context,
+                })
+        prev_boundary_count = cur_boundary_count
 
     # Decode only the generated part
-    gen_ids = generated_ids[input_ids.size(1):]
-    return tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+    gen_ids = generated_ids[prompt_len:]
+    text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+    if return_plan_vectors:
+        return text, plan_vectors
+    return text
 
 
 def _worker(rank, world_size, config, args, records):

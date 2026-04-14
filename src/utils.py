@@ -39,6 +39,32 @@ def extract_boxed_answer(text: str) -> str | None:
     return text[start : i - 1].strip()
 
 
+def extract_boxed_span(text: str) -> tuple[int, int] | None:
+    r"""Return (start, end) character indices of content inside last \boxed{...}.
+
+    Returns indices such that text[start:end] is the content (excluding markup).
+    Returns None if no \boxed{} found or braces are unbalanced.
+    """
+    idx = text.rfind("\\boxed{")
+    if idx == -1:
+        return None
+
+    start = idx + len("\\boxed{")
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+
+    if depth != 0:
+        return None
+
+    return (start, i - 1)
+
+
 def normalize_answer(answer: str) -> str:
     """Basic normalization for answer comparison."""
     if answer is None:

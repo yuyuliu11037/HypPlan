@@ -1,7 +1,7 @@
 model:
   base_model: "Qwen/Qwen2.5-7B"
   proj_hidden_dims: [2048]
-  plan_token: "[PLAN]"
+  plan_vector_scale: 1.0
 
 data:
   dataset: "EleutherAI/hendrycks_math"
@@ -17,6 +17,7 @@ stage1:
   grad_accum: 16
   warmup_ratio: 0.05
   output_dir: "checkpoints/stage1"
+  log_dir: "logs"
 
 eval:
   max_new_tokens: 2048
