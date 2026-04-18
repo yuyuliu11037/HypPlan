@@ -335,6 +335,10 @@ def main():
                         help="Inject z at step boundaries. Omit for the no-z control arm.")
     parser.add_argument("--arm_tag", default=None,
                         help="Optional override for output subdir suffix.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Override seed in config. When set, the default "
+                             "arm_tag becomes '{noz|z}_s{seed}' so multiple "
+                             "seeds don't overwrite each other.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -342,7 +346,14 @@ def main():
 
     distributed, rank, world_size, local_rank, device = setup_distributed()
 
-    arm_tag = args.arm_tag or ("z" if args.use_z else "noz")
+    # Seed override — also propagates into a seed-tagged arm_tag so multi-seed
+    # runs don't clobber each other.
+    if args.seed is not None:
+        config.setdefault("training", {})["seed"] = int(args.seed)
+        default_arm = ("z" if args.use_z else "noz") + f"_s{int(args.seed)}"
+    else:
+        default_arm = ("z" if args.use_z else "noz")
+    arm_tag = args.arm_tag or default_arm
     out_root = Path(config["training"]["output_dir"]) / arm_tag
     results_root = Path(config["eval"]["output_dir"]) / arm_tag
     if rank == 0:

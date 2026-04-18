@@ -2,21 +2,23 @@
 # Stage-3 (DAgger) trainer for a SINGLE arm + inference + eval.
 #
 # Usage:
-#   bash scripts/run_train_stage2_dagger.sh <ARM> [HEAD_TAG]
+#   bash scripts/run_train_stage2_dagger.sh <ARM> [HEAD_TAG] [SEED]
 #     ARM:      "noz" or "z"
 #     HEAD_TAG: e.g. "poincare_origin_ranking" (default).
+#     SEED:     optional int. When set, output subdir becomes
+#               "{arm}_s{seed}" so multi-seed runs don't overwrite each other.
 #
 # DDP across all GPUs in CUDA_VISIBLE_DEVICES (or auto-detected free ones).
-# Intended to be launched twice in parallel with different GPU sets for the
-# two arms, e.g.:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_train_stage2_dagger.sh z   poincare_origin_ranking &
-#   CUDA_VISIBLE_DEVICES=4,5,6   bash scripts/run_train_stage2_dagger.sh noz poincare_origin_ranking &
+# Intended to be launched in parallel for different (arm, seed) combos:
+#   CUDA_VISIBLE_DEVICES=0,5  bash scripts/run_train_stage2_dagger.sh z   poincare_origin_ranking 1234 &
+#   CUDA_VISIBLE_DEVICES=1,7  bash scripts/run_train_stage2_dagger.sh noz poincare_origin_ranking 1234 &
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ARM="${1:?usage: $0 <noz|z> [HEAD_TAG]}"
+ARM="${1:?usage: $0 <noz|z> [HEAD_TAG] [SEED]}"
 HEAD_TAG="${2:-poincare_origin_ranking}"
+SEED="${3:-}"
 MEM_THRESHOLD="${MEM_THRESHOLD:-30000}"
 MASTER_PORT="${MASTER_PORT:-29540}"
 BASE_CONFIG="configs/stage2_dagger.yaml"
@@ -51,21 +53,27 @@ PY
 
 USE_Z_FLAG=""
 if [ "$ARM" = "z" ]; then USE_Z_FLAG="--use_z"; fi
+SEED_FLAG=""
+ARM_SUFFIX="$ARM"
+if [ -n "$SEED" ]; then
+  SEED_FLAG="--seed $SEED"
+  ARM_SUFFIX="${ARM}_s${SEED}"
+fi
 
 python -m torch.distributed.run --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
-  -m src.train_stage2_dagger --config "$RUN_CONFIG" $USE_Z_FLAG --arm_tag "$ARM"
+  -m src.train_stage2_dagger --config "$RUN_CONFIG" $USE_Z_FLAG $SEED_FLAG --arm_tag "$ARM_SUFFIX"
 
 # Generate + evaluate (single GPU — the first visible one)
 CKPT_ROOT=$(python -c "import yaml; print(yaml.safe_load(open('$RUN_CONFIG'))['training']['output_dir'])")
 RES_ROOT=$(python -c "import yaml; print(yaml.safe_load(open('$RUN_CONFIG'))['eval']['output_dir'])")
 TEST=$(python -c "import yaml; print(yaml.safe_load(open('$RUN_CONFIG'))['data']['test_data'])")
-CKPT="$CKPT_ROOT/$ARM"
-RES="$RES_ROOT/$ARM"
+CKPT="$CKPT_ROOT/$ARM_SUFFIX"
+RES="$RES_ROOT/$ARM_SUFFIX"
 mkdir -p "$RES"
 EXTRA=""
 if [ "$ARM" = "noz" ]; then EXTRA="--no_z_inject"; fi
 
-echo "=== generating arm=$ARM ==="
+echo "=== generating arm=$ARM_SUFFIX ==="
 CUDA_VISIBLE_DEVICES=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print $1}') \
   python -m src.generate_24_stage2 \
     --stage2_checkpoint "$CKPT" \
@@ -76,5 +84,5 @@ python -m src.evaluate_24 \
   --input "$RES/generations.jsonl" \
   --output "$RES/metrics.json"
 
-echo "=== arm=$ARM complete ==="
+echo "=== arm=$ARM_SUFFIX complete ==="
 cat "$RES/metrics.json" | python -c "import sys,json; d=json.load(sys.stdin); print('accuracy:', d['overall'])"
