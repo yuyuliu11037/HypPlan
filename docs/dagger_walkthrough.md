@@ -102,29 +102,36 @@ Same problem, same rollout sequence, two arms compared.
 
 | Step | What happens during rollout | What gets recorded |
 |---|---|---|
-| Boundary 1 (before step 1) | **z arm**: inject `z_1 = up_proj(head(frozen_base(canonical_text(history=()))))` then sample. **No-z arm**: just sample. Model emits e.g. `" 10 - 4 = 6. Remaining: 5 6 6"`. | `(history=(), remaining=(4,5,6,10), winners=oracle((4,5,6,10)))` |
-| Boundary 2 (before step 2) | **z arm**: inject `z_2 = up_proj(head(frozen_base(canonical_text(history=((10,-,4,6),)))))`. **No-z arm**: nothing. Model emits e.g. `" 5 + 6 = 11. Remaining: 6 11"`. | `(history=((10,-,4,6),), remaining=(5,6,6), winners=oracle((5,6,6)))` |
-| Boundary 3 (before step 3) | **z arm**: `z_3` from history-of-2. **No-z arm**: nothing. Model emits e.g. `" 6 * 11 = 66. Answer: 66"`. | `(history=((10,-,4,6),(5,+,6,11)), remaining=(6,11), winners=oracle((6,11)))` |
+| Boundary 1 (before step 1) | **z arm**: inject `z_1 = up_proj(head(frozen_base(canonical_text(history=()))))` then sample. **No-z arm**: just sample. Model emits e.g. `" 10 - 4 = 6. Remaining: 5 6 6"` (a step on a winning path — `(5,6,6)` reaches 24 via 5×6=30 then 30−6=24). | `(history=(), remaining=(4,5,6,10), winners=oracle((4,5,6,10)))` |
+| Boundary 2 (before step 2) | **z arm**: inject `z_2 = up_proj(head(frozen_base(canonical_text(history=((10,-,4,6),)))))`. **No-z arm**: nothing. Model emits e.g. `" 5 + 6 = 11. Remaining: 6 11"` — a *legal* step but a wrong choice; `(6,11)` is a dead end. | `(history=((10,-,4,6),), remaining=(5,6,6), winners=oracle((5,6,6)) = [('*', 5, 6, 30), ('*', 6, 5, 30)])` |
+| Boundary 3 (before step 3) | Recorded but **`winners=oracle((6,11)) = []`** — `(6,11)` cannot reach 24 by any operation. Rollout stops here with `stopped_reason="empty_oracle"`; no training pair is collected from this boundary. | `(history=((10,-,4,6),(5,+,6,11)), remaining=(6,11), winners=[])` |
 
 The recorded *history* is **what the model actually emitted**, not what the
 oracle wanted. The recorded *winners* come from
 `oracle_24.winning_ops(remaining)` — recomputed live, no tree-file lookup.
+Boundaries with empty winners contribute no training pairs.
 
 ### Training phase (one pair → one CE pass)
 
 Take the pair from boundary 2:
-`history=((10,-,4,6),)`, `remaining=(5,6,6)`, `winners=oracle((5,6,6))`.
+`history=((10,-,4,6),)`, `remaining=(5,6,6)`,
+`winners=[('*', 5, 6, 30), ('*', 6, 5, 30)]`.
 
-Suppose the trainer's lex-tiebreak picks `winner = ('-', 6, 5, 1)` →
-resulting state `(1, 6)`. Target text:
-`" 6 - 5 = 1. Remaining: 1 6\nStep 3:"`
+The trainer's lex-tiebreak (sort by `(op_sym, a, b)`) picks
+`winner = ('*', 5, 6, 30)` → resulting state `(6, 30)` (which then reaches
+24 via `30 - 6` at step 3). Target text the model is taught to emit:
+
+```
+ 5 * 6 = 30. Remaining: 6 30
+Step 3:
+```
 
 **No-z arm — context fed to model:**
 
 ```
 [prompt embeds for "Use the four... Problem: 4 5 6 10\nStep 1:"]
 [step-1 embeds for " 10 - 4 = 6. Remaining: 5 6 6\nStep 2:"]   ← model's actual step 1
-+ target embeds for " 6 - 5 = 1. Remaining: 1 6\nStep 3:"     ← oracle's step 2 pick
++ target embeds for " 5 * 6 = 30. Remaining: 6 30\nStep 3:"   ← oracle's step 2 pick
 labels = [-100]*context_len + target_ids
 loss = CE on target positions
 ```
@@ -136,7 +143,7 @@ loss = CE on target positions
 [z_1 embed]   ← virtual token, up_proj(head(frozen_base(canonical_text(history=()))))
 [step-1 embeds for " 10 - 4 = 6. Remaining: 5 6 6\nStep 2:"]
 [z_2 embed]   ← virtual token, up_proj(head(frozen_base(canonical_text(history=((10,-,4,6),)))))
-+ target embeds for " 6 - 5 = 1. Remaining: 1 6\nStep 3:"
++ target embeds for " 5 * 6 = 30. Remaining: 6 30\nStep 3:"
 labels = [-100]*context_len + target_ids
 loss = CE on target positions
 ```
