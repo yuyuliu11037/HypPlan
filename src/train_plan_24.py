@@ -4,6 +4,9 @@ Freezes the SFT-trained LLM and trains only the ProjMLP.
 For each step boundary, computes a planning vector z from the hidden state
 and inserts it as a virtual token before the step tokens.
 Loss: cross-entropy on step tokens only.
+
+Supports DDP: each GPU loads the frozen 4-bit base independently; only
+ProjMLP gradients sync across ranks.
 """
 from __future__ import annotations
 
@@ -14,8 +17,9 @@ import os
 import torch
 import torch.nn as nn
 import yaml
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, get_cosine_schedule_with_warmup
 
 from src.projections import ProjMLP
@@ -30,11 +34,27 @@ def main():
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Distributed setup
+    distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
 
-    # Load frozen base model (merged SFT) in 4-bit
+    if distributed:
+        torch.distributed.init_process_group(backend="nccl", device_id=device)
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+    else:
+        rank = 0
+        world_size = 1
+
+    # Load frozen base model (merged SFT) in 4-bit on THIS rank's device
     model_name = config["model"]["base_model"]
-    print(f"Loading frozen base: {model_name}")
+    if rank == 0:
+        print(f"Loading frozen base: {model_name} (world_size={world_size})")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -58,18 +78,30 @@ def main():
         param.requires_grad = False
 
     hidden_dim = base_model.config.hidden_size
-    print(f"Hidden dim: {hidden_dim}")
+    if rank == 0:
+        print(f"Hidden dim: {hidden_dim}", flush=True)
 
-    # ProjMLP (trainable)
+    # Sync all ranks before DDP construction (4-bit model loading times vary)
+    if distributed:
+        torch.distributed.barrier()
+
+    # ProjMLP (trainable, float32 for stable gradients)
     proj = ProjMLP(
         hidden_dim,
         config["model"]["proj_hidden_dims"],
         target_norm=config["model"].get("plan_vector_scale", 1.0),
-    ).to(device).float()  # float32 for stable gradients
+    ).to(device).float()
 
-    trainable_params = list(proj.parameters())
-    total_params = sum(p.numel() for p in trainable_params)
-    print(f"ProjMLP trainable params: {total_params:,}")
+    if distributed:
+        proj = DDP(proj, device_ids=[local_rank], output_device=local_rank,
+                   find_unused_parameters=False, broadcast_buffers=False)
+        trainable_params = list(proj.module.parameters())
+    else:
+        trainable_params = list(proj.parameters())
+
+    if rank == 0:
+        total_params = sum(p.numel() for p in trainable_params)
+        print(f"ProjMLP trainable params: {total_params:,}")
 
     # Dataset
     dataset = Game24PlanDataset(
@@ -78,10 +110,15 @@ def main():
         max_seq_len=config["data"]["max_seq_len"],
     )
 
+    sampler = None
+    if distributed:
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+
     dataloader = DataLoader(
         dataset,
         batch_size=config["training"]["batch_size"],
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         collate_fn=collate_fn,
         num_workers=4,
         pin_memory=True,
@@ -100,17 +137,22 @@ def main():
     # Output dirs
     output_dir = config["training"]["output_dir"]
     log_dir = config["training"]["log_dir"]
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "plan_24_train.jsonl")
 
-    print(f"Training: {len(dataset)} samples, {epochs} epochs, "
-          f"grad_accum={grad_accum}, total_steps={total_steps}")
+    if rank == 0:
+        print(f"Training: {len(dataset)} samples, {epochs} epochs, "
+              f"grad_accum={grad_accum}, total_steps={total_steps} (per-rank)")
 
     embed_table = base_model.get_input_embeddings()
     global_step = 0
 
     for epoch in range(epochs):
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+
         epoch_loss = 0.0
         epoch_steps = 0
         z_norms = []
@@ -132,6 +174,10 @@ def main():
             B = input_ids.size(0)
             batch_loss = 0.0
             batch_steps = 0
+
+            # Accumulate all step losses into one scalar, then a single backward
+            # (required for DDP: each rank must have the same number of .backward() calls)
+            sample_losses = []
 
             for b in range(B):
                 valid_bp = boundary_positions[b][boundary_positions[b] >= 0]
@@ -185,10 +231,20 @@ def main():
                         ignore_index=-100,
                     )
 
-                    # Backward immediately (free graph)
-                    (loss_i / grad_accum).backward()
+                    sample_losses.append(loss_i)
                     batch_loss += loss_i.item()
                     batch_steps += 1
+
+            # Single backward per batch iter (DDP-compatible: same sync count per rank)
+            if sample_losses:
+                avg_loss = sum(sample_losses) / len(sample_losses)
+                (avg_loss / grad_accum).backward()
+            else:
+                # No valid boundaries in this batch — still participate in DDP sync
+                # by running a dummy forward+backward through proj (zero loss)
+                dummy_h = torch.zeros(1, hidden_dim, device=device, dtype=torch.float32)
+                _, dummy_z = proj(dummy_h)
+                (dummy_z.sum() * 0.0).backward()
 
             # Optimizer step
             if (batch_idx + 1) % grad_accum == 0:
@@ -202,12 +258,12 @@ def main():
                 epoch_loss += avg_batch_loss
                 epoch_steps += 1
 
-                if global_step % 10 == 0:
+                if rank == 0 and global_step % 10 == 0:
                     z_norm_mean = sum(z_norms[-batch_steps:]) / max(len(z_norms[-batch_steps:]), 1)
                     print(f"  step {global_step}/{total_steps} | "
                           f"loss={avg_batch_loss:.4f} | "
                           f"z_norm={z_norm_mean:.4f} | "
-                          f"lr={scheduler.get_last_lr()[0]:.2e}")
+                          f"lr={scheduler.get_last_lr()[0]:.2e}", flush=True)
                     with open(log_file, "a") as f:
                         f.write(json.dumps({
                             "step": global_step,
@@ -220,16 +276,22 @@ def main():
                 batch_loss = 0.0
                 batch_steps = 0
 
-        avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
-        print(f"Epoch {epoch}: avg_loss={avg_epoch_loss:.4f}")
+        if rank == 0:
+            avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
+            print(f"Epoch {epoch}: avg_loss={avg_epoch_loss:.4f}", flush=True)
 
-    # Save ProjMLP
-    print(f"Saving ProjMLP to {output_dir}")
-    torch.save(proj.state_dict(), os.path.join(output_dir, "proj.pt"))
-    # Save config for inference
-    with open(os.path.join(output_dir, "config.yaml"), "w") as f:
-        yaml.dump(config, f)
-    print("Done.")
+    # Save ProjMLP (rank 0 only)
+    if rank == 0:
+        print(f"Saving ProjMLP to {output_dir}")
+        state = proj.module.state_dict() if distributed else proj.state_dict()
+        torch.save(state, os.path.join(output_dir, "proj.pt"))
+        with open(os.path.join(output_dir, "config.yaml"), "w") as f:
+            yaml.dump(config, f)
+        print("Done.")
+
+    if distributed:
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+model:
+  base_model: "checkpoints/sft_24_tot_merged"
+  manifold: "poincare"
+  hyp_dim: 8
+  head_hidden_dims: [128]
+
+data:
+  tree_dir: "data/trees"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  pairs_per_tree: 256
+
+training:
+  loss: "distortion"
+  ranking_negatives: 8
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  epochs: 3
+  trees_per_batch: 1
+  warmup_ratio: 0.1
+  output_dir: "checkpoints/head_smoke"
+  log_dir: "logs"
+
+eval:
+  eval_pairs_per_tree: 512
+  vis_problems: [0]
+  vis_hyp_dim: 2
+  output_dir: "results/head_eval/smoke"

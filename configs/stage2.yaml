@@ -1,7 +1,12 @@
 model:
   base_model: "checkpoints/sft_24_tot_merged"
-  proj_hidden_dims: [2048]
-  plan_vector_scale: 1.0
+  head_checkpoint: "checkpoints/head_poincare_distortion/head.pt"
+  manifold: "poincare"
+  hyp_dim: 32
+  up_proj_hidden: 2048
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
 
 data:
   train_data: "data/24_train_plan5k_tot.jsonl"
@@ -14,10 +19,11 @@ training:
   batch_size: 1
   grad_accum: 4
   warmup_ratio: 0.05
-  output_dir: "checkpoints/plan_24_tot"
+  output_dir: "checkpoints/hyp_stage2_poincare_distortion"
   log_dir: "logs"
 
 eval:
   max_new_tokens: 256
   temperature: 0.0
-  output_dir: "results/24_plan_tot"
+  max_z_injections: 3
+  output_dir: "results/hyp_stage2_poincare_distortion"

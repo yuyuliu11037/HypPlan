@@ -13,16 +13,16 @@ python -m src.train_sft_24 --config "$CONFIG"
 echo "--- Generating ---"
 python -m src.generate_24_sft \
     --base_model "meta-llama/Llama-3.1-8B-Instruct" \
-    --adapter "checkpoints/sft_24" \
-    --test_data "data/24_test.jsonl" \
-    --output "results/24_sft/generations.jsonl" \
+    --adapter "checkpoints/sft_24_tot" \
+    --test_data "data/24_test_tot.jsonl" \
+    --output "results/24_sft_tot/generations.jsonl" \
     --max_new_tokens 256 \
     --temperature 0.0
 
 # Step 3: Evaluate
 echo "--- Evaluating ---"
 python -m src.evaluate_24 \
-    --input "results/24_sft/generations.jsonl" \
-    --output "results/24_sft/metrics.json"
+    --input "results/24_sft_tot/generations.jsonl" \
+    --output "results/24_sft_tot/metrics.json"
 
 echo "=== Done ==="

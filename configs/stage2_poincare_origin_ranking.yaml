@@ -1,0 +1,26 @@
+data:
+  max_seq_len: 256
+  test_data: data/24_test_tot.jsonl
+  train_data: data/24_train_plan5k_tot.jsonl
+eval:
+  max_new_tokens: 256
+  max_z_injections: 3
+  output_dir: results/hyp_stage2_poincare_origin_ranking
+  temperature: 0.0
+model:
+  base_model: checkpoints/sft_24_tot_merged
+  head_checkpoint: checkpoints/head_poincare_origin_ranking/head.pt
+  hyp_dim: 32
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_r: 16
+  manifold: poincare
+  up_proj_hidden: 2048
+training:
+  batch_size: 1
+  epochs: 3
+  grad_accum: 4
+  log_dir: logs
+  lr: 0.0001
+  output_dir: checkpoints/hyp_stage2_poincare_origin_ranking
+  warmup_ratio: 0.05

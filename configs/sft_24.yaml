@@ -5,20 +5,20 @@ model:
   lora_dropout: 0.05
 
 data:
-  train_data: "data/24_train_sft3k_v2.jsonl"
-  test_data: "data/24_test.jsonl"
+  train_data: "data/24_train_sft3k_tot.jsonl"
+  test_data: "data/24_test_tot.jsonl"
   max_seq_len: 256
 
 training:
   lr: 2.0e-4
   epochs: 3
-  batch_size: 4
-  grad_accum: 4
+  batch_size: 16
+  grad_accum: 1
   warmup_ratio: 0.05
-  output_dir: "checkpoints/sft_24_v2"
+  output_dir: "checkpoints/sft_24_tot"
   log_dir: "logs"
 
 eval:
   max_new_tokens: 256
   temperature: 0.0
-  output_dir: "results/24_sft"
+  output_dir: "results/24_sft_tot"

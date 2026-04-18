@@ -1,0 +1,28 @@
+data:
+  test_data: data/24_test_tot.jsonl
+  train_data: data/24_train.jsonl
+  train_limit: -1
+eval:
+  max_new_tokens: 256
+  max_z_injections: 3
+  output_dir: results/dagger_stage2_poincare_origin_ranking
+  temperature: 0.0
+model:
+  base_model: checkpoints/sft_24_tot_merged
+  head_checkpoint: checkpoints/head_poincare_origin_ranking/head.pt
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_r: 16
+  up_proj_hidden: 2048
+training:
+  epochs: 3
+  grad_clip: 1.0
+  lr: 0.0001
+  max_steps: 3
+  output_dir: checkpoints/dagger_stage2_poincare_origin_ranking
+  rollout_max_new_tokens: 200
+  rollout_temperature: 0.7
+  rollout_top_p: 0.95
+  rollouts_per_problem: 3
+  seed: 1234
+  weight_decay: 0.0

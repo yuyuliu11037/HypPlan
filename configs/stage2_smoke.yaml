@@ -1,0 +1,29 @@
+model:
+  base_model: "checkpoints/sft_24_tot_merged"
+  head_checkpoint: "checkpoints/head_smoke/head.pt"
+  manifold: "poincare"
+  hyp_dim: 8
+  up_proj_hidden: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+
+data:
+  train_data: "data/24_train_smoke.jsonl"
+  test_data: "data/24_test_smoke.jsonl"
+  max_seq_len: 256
+
+training:
+  lr: 1.0e-4
+  epochs: 1
+  batch_size: 1
+  grad_accum: 1
+  warmup_ratio: 0.1
+  output_dir: "checkpoints/hyp_stage2_smoke"
+  log_dir: "logs"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  max_z_injections: 3
+  output_dir: "results/hyp_stage2_smoke"

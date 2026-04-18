@@ -1,0 +1,29 @@
+model:
+  base_model: "checkpoints/sft_24_tot_merged"
+  proj_hidden_dims: [2048]
+  plan_vector_scale: null   # free z norm (we monitor via L2 reg)
+
+data:
+  train_data: "data/24_train_dpo_tot.jsonl"
+  refs_cache: "data/24_train_dpo_tot_refs.pt"
+  test_data: "data/24_test_tot.jsonl"
+  max_ctx_len: 256
+  max_tail_len: 48
+
+training:
+  lr: 1.0e-4
+  beta: 0.1
+  lambda_plan: 1.0           # CE-on-r+ (token-mean) weight
+  lambda_dpo: 1.0            # DPO term weight  (try 0.1, 1.0, 10.0)
+  lambda_z_l2: 1.0e-3        # L2 penalty on ‖z‖² to prevent explosion
+  epochs: 3
+  batch_size: 1
+  grad_accum: 4
+  warmup_ratio: 0.05
+  output_dir: "checkpoints/plan_24_combined"
+  log_dir: "logs"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  output_dir: "results/24_plan_combined"

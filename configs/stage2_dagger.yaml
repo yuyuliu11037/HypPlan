@@ -1,0 +1,35 @@
+model:
+  base_model: "checkpoints/sft_24_tot_merged"
+  head_checkpoint: "checkpoints/head_poincare_origin_ranking/head.pt"
+  up_proj_hidden: 2048
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_data: "data/24_train.jsonl"      # only `problem` field used; dedupe in loader
+  test_data: "data/24_test_tot.jsonl"
+  train_limit: -1              # -1 = use all 1090 train problems
+
+training:
+  epochs: 3
+  lr: 1.0e-4
+  weight_decay: 0.0
+  seed: 1234
+  grad_clip: 1.0
+
+  # Rollout (per-problem generation)
+  rollouts_per_problem: 3
+  rollout_temperature: 0.7
+  rollout_top_p: 0.95
+  rollout_max_new_tokens: 200
+  max_steps: 3
+
+  # Output dir layout: {output_dir}/{arm_tag}/ where arm_tag in {z, noz}
+  output_dir: "checkpoints/dagger_stage2_poincare_origin_ranking"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  max_z_injections: 3
+  output_dir: "results/dagger_stage2_poincare_origin_ranking"

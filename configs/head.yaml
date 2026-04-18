@@ -1,0 +1,29 @@
+model:
+  base_model: "checkpoints/sft_24_tot_merged"
+  manifold: "poincare"          # "poincare" or "lorentz"
+  hyp_dim: 32
+  head_hidden_dims: [1024, 256]
+
+data:
+  tree_dir: "data/trees"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  pairs_per_tree: 2048
+
+training:
+  loss: "distortion"            # "distortion" or "ranking"
+  ranking_negatives: 10
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  epochs: 20
+  trees_per_batch: 4
+  warmup_ratio: 0.05
+  output_dir: "checkpoints/head_poincare_distortion"
+  log_dir: "logs"
+
+eval:
+  eval_pairs_per_tree: 4096
+  vis_problems: [0, 5, 42]
+  vis_hyp_dim: 2
+  output_dir: "results/head_eval/poincare_distortion"
