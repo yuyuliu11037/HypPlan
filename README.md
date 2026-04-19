@@ -23,7 +23,7 @@ This makes `|z|` track solution-proximity: states closer to a solution are pulle
 A fresh LoRA adapter on the SFT-merged base + a small `UpProjector` (lifts the 32-dim hyperbolic point back to hidden_dim=4096) are the only trainable parts. Training uses **DAgger** (expert iteration, AlphaGo-style):
 
 At each epoch, for each training problem:
-1. **Rollout under current policy** — generate step-by-step with T=0.7, top-p=0.95, injecting `z_t` as a virtual token at each step boundary (z-arm only; the no-z control arm skips the injection). Continue until a valid solution, an invalid step, or step budget exhausted.
+1. **Rollout under current policy** — generate step-by-step with T=0.7, top-p=0.95, injecting `z_t` as a virtual token at each step boundary (z run only; the no-z control run skips the injection). Continue until a valid solution, an invalid step, or step budget exhausted.
 2. **Oracle labeling** — for each step-boundary state reached, query the oracle (memoized recursive search via `src/oracle_24.py`): given `remaining`, return all ops whose resulting state can still reach 24.
 3. **Invalid-step handling** — if the model emits a step with wrong arithmetic or hallucinated operands, truncate the trajectory at that step. Earlier valid states still contribute.
 4. **Training pass** — for each collected (state, z, winning_ops) tuple, pick one winner (lex tiebreak) and CE-train the model to emit its full step text. Backprop into LoRA + UpProjector; head and base stay frozen.
@@ -70,17 +70,17 @@ Each run trains for 20 epochs on the cached hidden states (no LLM loaded), saves
 ### 3. Stage 2 — DAgger training + inference + eval
 
 ```bash
-# Per-arm per-seed launcher. Requires a stage-1 head first.
+# Per-run per-seed launcher. Requires a stage-1 head first.
 bash scripts/run_train_stage2_dagger.sh <noz|z> poincare_origin_ranking [seed]
 ```
 
-Each invocation trains one arm (z-injected or no-z control) for one seed. A full 3-seed two-arm sweep = 6 invocations. The driver (a) trains the LoRA + UpProjector across all detected free GPUs with DDP (manual gradient averaging — see *Distributed training notes* below), (b) generates 100 test-problem solutions with `src.generate_24_stage2`, (c) validates them with `src.evaluate_24`.
+Each invocation trains one run (z-injected or no-z control) for one seed. A full 3-seed two-run sweep = 6 invocations. The driver (a) trains the LoRA + UpProjector across all detected free GPUs with DDP (manual gradient averaging — see *Distributed training notes* below), (b) generates 100 test-problem solutions with `src.generate_24_stage2`, (c) validates them with `src.evaluate_24`.
 
 Artifacts:
-- `checkpoints/dagger_stage2_{head_tag}/{arm_s{seed}}/` — LoRA + UpProjector.
-- `results/dagger_stage2_{head_tag}/{arm_s{seed}}/{generations.jsonl, metrics.json, rollout_stats_epoch*.json}`.
+- `checkpoints/dagger_stage2_{head_tag}/{noz|z}_s{seed}/` — LoRA + UpProjector.
+- `results/dagger_stage2_{head_tag}/{noz|z}_s{seed}/{generations.jsonl, metrics.json, rollout_stats_epoch*.json}`.
 
-No-z ablation is the control arm (`--use_z` off). Inference-time `--random_z` is also supported via `src.generate_24_stage2` for sanity-checking a trained z-arm checkpoint.
+No-z is the control (`--use_z` off). Inference-time `--random_z` is also supported via `src.generate_24_stage2` for sanity-checking a trained z-run checkpoint.
 
 ---
 
@@ -145,13 +145,13 @@ Under free generation the model reaches genuinely uncertain states; z then
 carries decision-relevant information the model cannot trivially recompute
 from context. See the Stage-2 section above for the full training loop.
 
-### Two-arm experimental design
+### Two-run experimental design
 
-Both arms use **identical** code path, warm start, sampling hyperparams,
+Both runs use **identical** code path, warm start, sampling hyperparams,
 oracle rules, and DAgger schedule. A single `--use_z` flag toggles z-injection
 on/off. This isolates z's contribution from the exposure-bias fix, both of
 which independently should raise accuracy. The clean metric:
-`Δ_accuracy = acc(z-arm) − acc(no-z-arm)`.
+`Δ_accuracy = acc(z run) − acc(no-z run)`.
 
 ### Warm start (critical design choice)
 
@@ -185,7 +185,7 @@ from scratch.
 4. T=0.7, top-p=0.95 for rollout. Greedy for eval.
 5. Lockstep DAgger: per epoch, rollout all 1090 train problems (3 trajectories
    each ≈ 3300 trajectories), then one CE pass over collected pairs. Repeat
-   for 3 epochs. Both arms run simultaneously.
+   for 3 epochs. Both runs execute in parallel.
 
 ### Results summary
 
@@ -205,15 +205,15 @@ any compressed MLP summary of the hidden state, we swapped the Poincaré head
 for a Euclidean variant of identical architecture (same MLP widths, same
 `hyp_dim=32`, same `origin_ranking` loss — only the exp-map and distance
 function differ; `origin_distance = ‖z‖₂`, pairwise = L2). Same 3 DDP seeds.
-The `noz` arm is reused unchanged (it never calls the head).
+The `noz` run is reused unchanged (it never calls the head).
 
 | Quantity | Poincaré | Euclidean |
 |---|---|---|
-| z-arm mean ± std | **0.410 ± 0.020** | 0.330 ± 0.090 |
+| z run mean ± std | **0.410 ± 0.020** | 0.330 ± 0.090 |
 | Δ (z − noz) mean ± std | **+7.7 ± 4.2 pp** | −0.3 ± 7.6 pp |
 | Seeds with positive Δ | 3/3 | 2/3 (seed 1234 → −9pp) |
 
-Poincaré beats Euclidean in mean z-arm accuracy by ~8pp with less than half
+Poincaré beats Euclidean in mean z-run accuracy by ~8pp with less than half
 the variance, and is monotonically positive across seeds while Euclidean's
 lift is seed-dependent (one seed catastrophically worse than no-z at all).
 Paired t-test on `Δ_hyp − Δ_euc` per seed (+20, +6, −2): t≈1.25, df=2, p≈0.34
@@ -235,21 +235,21 @@ with per-seed landing in a bad scale regime.
 - `src/dagger_rollout.py` — One-problem rollout: token-by-token sampling
   with per-step z injection, step parsing, oracle labeling, invalid-step
   detection, tolerant regex for z-injection prefix artifacts.
-- `src/train_stage2_dagger.py` — Two-arm Stage-2 (DAgger) trainer. `--use_z`
+- `src/train_stage2_dagger.py` — Two-run Stage-2 (DAgger) trainer. `--use_z`
   flag, `--seed` override for multi-seed runs. Manual gradient averaging
   under DDP. NCCL collective timeout raised to 60 min to tolerate rank
   imbalance during variable-length rollouts.
 - `configs/stage2_dagger.yaml` — Stage-2 config template.
-- `scripts/run_train_stage2_dagger.sh` — Per-arm per-seed launcher:
+- `scripts/run_train_stage2_dagger.sh` — Per-run per-seed launcher:
   `bash run_train_stage2_dagger.sh <noz|z> <head_tag> [seed]`.
 
 Artifacts:
-- `checkpoints/dagger_stage2_{head_tag}/{arm_or_arm_s{seed}}/` — LoRA +
+- `checkpoints/dagger_stage2_{head_tag}/{noz|z}_s{seed}/` — LoRA +
   UpProjector.
-- `results/dagger_stage2_{head_tag}/{arm_or_arm_s{seed}}/{generations.jsonl, metrics.json, rollout_stats_epoch*.json}`.
+- `results/dagger_stage2_{head_tag}/{noz|z}_s{seed}/{generations.jsonl, metrics.json, rollout_stats_epoch*.json}`.
 
 See [docs/dagger_walkthrough.md](docs/dagger_walkthrough.md) for a concrete
-example walkthrough (rollout terminology, oracle mechanics, z vs no-z arm
+example walkthrough (rollout terminology, oracle mechanics, z vs no-z run
 side-by-side on problem `4,5,6,10`).
 
 ---
@@ -270,7 +270,7 @@ HypPlan/
 │   ├── oracle_24.py           # stage-2 oracle: winning_ops(remaining)
 │   ├── dagger_rollout.py      # stage-2 rollout + oracle labeling
 │   ├── dataset_24_stage2.py   # per-boundary canonical state tokenization
-│   ├── train_stage2_dagger.py # stage-2 (DAgger) trainer (two-arm, DDP)
+│   ├── train_stage2_dagger.py # stage-2 (DAgger) trainer (two-run, DDP)
 │   ├── generate_24_stage2.py  # inference (supports --no_z_inject, --random_z)
 │   └── evaluate_24.py         # solution validator (unchanged)
 ├── data/
@@ -282,14 +282,14 @@ HypPlan/
 ├── scripts/
 │   ├── run_gen_tree_data.sh
 │   ├── run_train_head.sh
-│   └── run_train_stage2_dagger.sh     # stage-2 per-arm per-seed
+│   └── run_train_stage2_dagger.sh     # stage-2 per-run per-seed
 ├── checkpoints/
 │   ├── sft_24_tot_merged/             # frozen feature extractor
 │   ├── head_{manifold}_origin_ranking/ # stage-1 heads
-│   └── dagger_stage2_{head_tag}/{arm_s{seed}}/
+│   └── dagger_stage2_{head_tag}/{noz|z}_s{seed}/
 └── results/
     ├── head_eval/{manifold}_origin_ranking/
-    └── dagger_stage2_{head_tag}/{arm_s{seed}}/
+    └── dagger_stage2_{head_tag}/{noz|z}_s{seed}/
 ```
 
 Old v1 files (`train_plan_24.py`, `generate_24_plan.py`, `train_sft_24.py`, `train_stage1.py`, `train_stage2.py` — the teacher-forced precursor, …) remain in place as reference — not deleted so prior `results/` stay reproducible.
