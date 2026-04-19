@@ -100,32 +100,52 @@ All runs default to 100 held-out test problems from `data/24_test_tot.jsonl`. Sc
 
 ## Results so far (100 problems, greedy decoding, ≤3 z-injections)
 
+All Stage-3 numbers below are reported as **mean ± stdev across 3 DDP seeds
+(1234, 4242, 6666)**; 2-GPU DDP is the regime used for all reported Stage-3
+values because single-GPU runs showed ~3× higher seed variance (see
+*Single-GPU vs DDP* below).
+
 | System | Accuracy | Notes |
 |---|---|---|
 | Prior plan_24_tot (old end-to-end z training) | 0.12 | `results/24_plan_tot/` |
 | Prior SFT-only baseline | 0.12 | `results/24_sft_tot/` |
-| HypPlan v2 — Lorentz + distortion | 0.20 | `results/hyp_stage2_lorentz_distortion/` |
-| HypPlan v2 — Poincaré + distortion | 0.22 | `results/hyp_stage2_poincare_distortion/` |
-| Null baseline (LoRA trained + tested with random z) | 0.21 | `results/hyp_stage2_null_randomz/` |
-| HypPlan v2 — Lorentz + origin_ranking | 0.18 | `results/hyp_stage2_lorentz_origin_ranking/` |
-| HypPlan v2 — Poincaré + origin_ranking | 0.21 | `results/hyp_stage2_poincare_origin_ranking/` |
-| **Stage 3 — DAgger no-z (control)** | **0.32** | `results/dagger_stage2_poincare_origin_ranking/noz/` |
-| **Stage 3 — DAgger with-z** | **0.43** | `results/dagger_stage2_poincare_origin_ranking/z/` |
+| Stage-2 null (LoRA trained + tested with random z) | 0.21 | `results/hyp_stage2_null_randomz/` |
+| Stage-2 best (Poincaré + distortion, teacher-forced) | 0.22 | `results/hyp_stage2_poincare_distortion/` |
+| Stage-2 Poincaré + origin_ranking (teacher-forced) | 0.21 | `results/hyp_stage2_poincare_origin_ranking/` |
+| **Stage-3 DAgger no-z (control, 3-seed mean)** | **0.333 ± 0.019** | `results/dagger_stage2_poincare_origin_ranking/noz_s*/` |
+| **Stage-3 DAgger + Poincaré z (3-seed mean)** | **0.410 ± 0.020** | `results/dagger_stage2_poincare_origin_ranking/z_s*/` |
+| **Stage-3 DAgger + Euclidean z (3-seed mean)** | 0.330 ± 0.090 | `results/dagger_stage2_euclidean_origin_ranking/z_s*/` |
 
-**Stage 3 result (two-arm isolation):** +11pp from DAgger alone (exposure-bias
-fix) AND +11pp from the z signal on top. Total +31pp over SFT baseline. The
-prior negative stage-2 result was a teacher-forcing artifact: z was
-informationally redundant given the ground-truth preceding trajectory, so CE
-had no gradient pressure to use it. Under DAgger with free generation +
-oracle labels, z finally has decision-relevant signal the model can't
-trivially recompute from text context.
+**Stage-3 headline (DDP, n=3 seeds):**
 
-**Head-attributable contribution (teacher-forced stage-2) was zero.** All
-z-injected runs (0.18–0.22) were statistically indistinguishable from the
-proper null baseline (0.21). The ~9pp lift over SFT came from "extra LoRA
-fine-tuning on more data," not from z. See **Stage-3: DAgger with tree
-oracle** below for the fix — under free-generation training with oracle
-labels, z finally transmits a real signal.
+| Quantity | Value |
+|---|---|
+| No-z → with-z Δ (Poincaré), paired | **+7.7 ± 4.2 pp** (+11, +9, +3 per seed) |
+| No-z → with-z Δ (Euclidean), paired | −0.3 ± 7.6 pp (−9, +3, +5) |
+| SFT → DAgger no-z (exposure-bias fix) | +21.3 pp |
+| SFT → DAgger + Poincaré z (total) | +29.0 pp |
+
+Per-seed raw numbers (DDP):
+
+| Seed | noz | z (Poincaré) | Δ_hyp | z (Euclidean) | Δ_euc |
+|---|---|---|---|---|---|
+| 1234 | 0.32 | 0.43 | +11 | 0.23 | **−9** |
+| 4242 | 0.32 | 0.41 | +9 | 0.35 | +3 |
+| 6666 | 0.36 | 0.39 | +3 | 0.41 | +5 |
+
+**Teacher-forced Stage-2 contributed nothing from z.** All Stage-2 z-injected
+runs (0.18–0.22) were statistically indistinguishable from the null (0.21).
+The ~10pp lift over SFT came from "extra LoRA fine-tuning on more data," not
+from z. The fix was Stage 3 (DAgger) — see below.
+
+**Single-GPU vs DDP.** We originally ran seed 1234 with 2-GPU DDP and three
+more seeds on single-GPU. The single-GPU regime showed *much* higher
+seed variance (noz = 0.18 / 0.21 / 0.35, range 17pp) because batch_size=1
+makes per-step gradient noise 2× higher, and the single-GPU run does 2× as
+many optimizer steps to process the same data. We therefore rely on the
+3-seed DDP numbers as the headline; single-GPU numbers are kept only for
+completeness under `results/dagger_stage2_poincare_origin_ranking/{noz_s2024,
+z_s2024, noz_s7777, z_s7777, noz_s9999, z_s9999}/`.
 
 Stage-1 grid (Spearman rank correlation of `d_hyp` vs `d_tree` on held-out test trees):
 
@@ -147,7 +167,7 @@ downstream by Stage 3 (DAgger).
 
 ---
 
-## Stage 3 — DAgger with tree oracle (IN DEVELOPMENT)
+## Stage 3 — DAgger with tree oracle
 
 ### Diagnosis of stage-2 failure
 
@@ -200,11 +220,16 @@ At each epoch, for each training problem `P`:
    step**. Earlier valid states still contribute to training. Track
    invalid-step rate as a primary metric; alarm if >50% post-warm-start.
 4. **Training pass.** For each collected `(s_t, z_t, winning_ops_t)` tuple,
-   compute the **log-of-sum** loss:
-   `L = −log Σ_{op ∈ winning_ops} p(op_tokens | prefix, z_t)`
-   This treats "any winning op is correct" as a single event — the policy is
-   free to be peaked on one winner. Backprop into LoRA + UpProjector; head
-   and base remain frozen.
+   pick one winner deterministically (lex-order on `(op, a, b)`) and CE-train
+   the model to emit its full step text. Backprop into LoRA + UpProjector;
+   head and base remain frozen.
+   - *Phase-1 loss: single-winner CE.* All winners at a given step share
+     `v(s') = len(s')−1` on a shallow 3-step tree, so v-based tiebreaking
+     doesn't differentiate — lex is as principled as anything else and keeps
+     compute to one forward pass per training example.
+   - *Phase-2 upgrade path:* log-of-sum over full step texts of all winners
+     via gradient-accumulated softmax reweighting (≈K× compute). Not needed
+     to produce the current results.
 
 ### Two-arm experimental design
 
@@ -226,51 +251,93 @@ Warm start from:
 - SFT-merged base (frozen) — already hits 0.12 accuracy.
 - **Fresh LoRA** with standard PEFT init (A ∼ 𝒩, B = 0, so delta = 0 at
   step 0).
-- **Zero-init UpProjector** (final Linear weight & bias zero → `z_inj = 0`
-  initially, which is a harmless attention sink).
+- **Small-std-init UpProjector** (σ=1e-3 on the final Linear's weight, bias=0).
+  We initially tried fully zero-init but `LayerNorm(0)` combined with the
+  Llama-3.1-Instruct chat template triggered a degenerate fallback where the
+  model emitted `"assistant\n..."` at step 1. A tiny non-zero init sidesteps
+  this while staying close to "no effect" at step 0.
 - Frozen `head_{manifold}_origin_ranking` as the critic.
 
-First rollout with this init = pure SFT-merged behavior = 0.12 baseline,
-without inheriting any bad z-attention habits. DAgger teaches the LoRA to use
-z from scratch.
+First rollout with this init ≈ pure SFT-merged behavior (0.12), without
+inheriting any bad z-attention habits. DAgger teaches the LoRA to use z
+from scratch.
 
 ### Decisions locked in
 
 1. Drop invalid trajectories from the invalid step onward. Log drop rate per
    epoch; alarm if >50% after epoch 0.
-2. **Log-of-sum** loss (not sum-of-logs) over winning ops. Allows peakedness
-   within the winning set.
-3. Fresh LoRA (B=0) + zero-init UpProjector. See above.
+2. Single-winner CE (phase 1, lex tiebreak). See loss note above.
+3. Fresh LoRA (B=0) + small-std-init UpProjector (σ=1e-3). See warm-start note.
 4. T=0.7, top-p=0.95 for rollout. Greedy for eval.
 5. Lockstep DAgger: per epoch, rollout all 1090 train problems (3 trajectories
    each ≈ 3300 trajectories), then one CE pass over collected pairs. Repeat
    for 3 epochs. Both arms run simultaneously.
 
-### Expected signal strength
+### Results (3-seed DDP)
 
-Free-generation training will likely raise accuracy on its own (exposure bias
-is real). The no-z control isolates exposure-bias lift from z-signal lift.
-**The meaningful result is Δ_accuracy.** If Δ is small on 24-Game, the
-framework is still expected to pay off on tasks where z has a stronger
-information advantage over text-derivable reasoning (deeper search trees,
-more numbers, combinatorial puzzles). 24-Game is chosen here because all
-infrastructure already exists; migrating the pipeline to a harder task only
-requires new tree enumeration + new oracle.
+See the headline table at the top. Summary:
+
+- **DAgger alone (no z)**: 0.333 ± 0.019 — +21pp over the 0.12 SFT baseline,
+  +12pp over the prior stage-2 null (0.21). This is the exposure-bias fix:
+  training on model-reached states teaches recovery behavior that teacher
+  forcing can't.
+- **DAgger + Poincaré z**: 0.410 ± 0.020 — adds **+7.7 ± 4.2pp** on top,
+  z > noz on 3/3 seeds.
+- Total lift over SFT: **+29pp** (0.12 → 0.41).
+
+### Hyperbolic vs Euclidean ablation
+
+To test whether the lift requires *hyperbolic* geometry specifically or just
+any compressed MLP summary of the hidden state, we swapped the Poincaré head
+for a Euclidean variant of identical architecture (same MLP widths, same
+`hyp_dim=32`, same `origin_ranking` loss — only the exp-map and distance
+function differ; `origin_distance = ‖z‖₂`, pairwise = L2). Same 3 DDP seeds.
+The `noz` arm is reused unchanged (it never calls the head).
+
+| Quantity | Poincaré | Euclidean |
+|---|---|---|
+| z-arm mean ± std | **0.410 ± 0.020** | 0.330 ± 0.090 |
+| Δ (z − noz) mean ± std | **+7.7 ± 4.2 pp** | −0.3 ± 7.6 pp |
+| Seeds with positive Δ | 3/3 | 2/3 (seed 1234 → −9pp) |
+
+Poincaré beats Euclidean in mean z-arm accuracy by ~8pp with less than half
+the variance, and is monotonically positive across seeds while Euclidean's
+lift is seed-dependent (one seed catastrophically worse than no-z at all).
+Paired t-test on `Δ_hyp − Δ_euc` per seed (+20, +6, −2): t≈1.25, df=2, p≈0.34
+— direction supports the geometry claim but **n=3 is insufficient for
+p<0.05**.
+
+Mechanistic hypothesis for Euclidean's instability: `origin_ranking` under
+L2 is scale-invariant (the margin inequality can be satisfied by arbitrary
+|z| scaling). Hyperbolic spaces bound distance growth naturally — Poincaré's
+distance scales logarithmically with Euclidean norm on the ball, avoiding
+unbounded drift. Seed 1234's catastrophic Euclidean result is consistent
+with per-seed landing in a bad scale regime.
 
 ### Components (files)
 
-- `src/oracle_24.py` — Given `remaining`, returns winning next-ops. Pure
-  Python + `fractions.Fraction` arithmetic; small lru_cache.
-- `src/dagger_rollout.py` — One-problem rollout: sampling loop with per-step
-  z injection, step parsing, oracle labeling, invalid-step detection.
-- `src/train_stage2_dagger.py` — Two-arm DAgger trainer. `--use_z` flag.
-  Manual gradient averaging under DDP (same pattern as `train_stage2.py`).
+- `src/oracle_24.py` — Given `remaining`, returns winning next-ops via a
+  memoized recursive search (not a tree-file lookup). Handles any state
+  the model can reach, including off-tree sequences.
+- `src/dagger_rollout.py` — One-problem rollout: token-by-token sampling
+  with per-step z injection, step parsing, oracle labeling, invalid-step
+  detection, tolerant regex for z-injection prefix artifacts.
+- `src/train_stage2_dagger.py` — Two-arm DAgger trainer. `--use_z` flag,
+  `--seed` override for multi-seed runs. Manual gradient averaging under
+  DDP. NCCL collective timeout raised to 60 min to tolerate rank
+  imbalance during variable-length rollouts.
 - `configs/stage2_dagger.yaml` — DAgger config template.
-- `scripts/run_train_stage2_dagger.sh` — Launcher with auto-GPU detection.
+- `scripts/run_train_stage2_dagger.sh` — Per-arm per-seed launcher:
+  `bash run_train_stage2_dagger.sh <noz|z> <head_tag> [seed]`.
 
 Artifacts:
-- `checkpoints/dagger_stage2_{head_tag}_{arm}/` — LoRA + UpProjector.
-- `results/dagger_stage2_{head_tag}_{arm}/{generations.jsonl, metrics.json, rollout_stats.jsonl}`.
+- `checkpoints/dagger_stage2_{head_tag}/{arm_or_arm_s{seed}}/` — LoRA +
+  UpProjector.
+- `results/dagger_stage2_{head_tag}/{arm_or_arm_s{seed}}/{generations.jsonl, metrics.json, rollout_stats_epoch*.json}`.
+
+See [docs/dagger_walkthrough.md](docs/dagger_walkthrough.md) for a concrete
+example walkthrough (rollout terminology, oracle mechanics, z vs no-z arm
+side-by-side on problem `4,5,6,10`).
 
 ---
 
@@ -280,31 +347,41 @@ Artifacts:
 HypPlan/
 ├── configs/
 │   ├── head.yaml              # stage-1 template (manifold + loss switchable)
-│   └── stage2.yaml            # stage-2 template
+│   ├── stage2.yaml            # teacher-forced stage-2 template (legacy)
+│   └── stage2_dagger.yaml     # DAgger stage-3 template
 ├── src/
 │   ├── tree_data.py           # enumerate_tree, render_state, pair_distances_lca
 │   ├── hyperbolic.py          # Lorentz ops (unchanged from v1)
-│   ├── head.py                # HyperbolicHead (Poincaré/Lorentz) + UpProjector
-│   ├── train_head.py          # stage-1 trainer (distortion or ranking)
+│   ├── head.py                # HyperbolicHead (Poincaré/Lorentz/Euclidean) + UpProjector
+│   ├── train_head.py          # stage-1 trainer (distortion/ranking/origin_ranking)
 │   ├── eval_head.py           # distortion/Spearman + 2D viz
+│   ├── oracle_24.py           # stage-3 oracle: winning_ops(remaining)
+│   ├── dagger_rollout.py      # stage-3 rollout + oracle labeling
 │   ├── dataset_24_stage2.py   # per-boundary canonical state tokenization
-│   ├── train_stage2.py        # LoRA + up-projector DDP trainer
-│   ├── generate_24_stage2.py  # inference with frozen head + up-projector
+│   ├── train_stage2.py        # teacher-forced stage-2 trainer (legacy)
+│   ├── train_stage2_dagger.py # DAgger stage-3 trainer (two-arm, DDP)
+│   ├── generate_24_stage2.py  # inference (supports --no_z_inject, --random_z)
 │   └── evaluate_24.py         # solution validator (unchanged)
 ├── data/
 │   ├── generate_tree_data.py  # offline tree + hidden-state cache builder
 │   ├── 24_{train,val,test}.jsonl
 │   └── trees/                 # cached tree metadata + hidden states
+├── docs/
+│   └── dagger_walkthrough.md  # concrete example of DAgger mechanics
 ├── scripts/
 │   ├── run_gen_tree_data.sh
-│   ├── run_train_head.sh      # single-config
-│   ├── run_stage1_grid.sh     # 4-way parallel ablation grid
-│   └── run_train_stage2.sh
+│   ├── run_train_head.sh
+│   ├── run_stage1_grid.sh
+│   ├── run_train_stage2.sh            # legacy teacher-forced stage-2
+│   └── run_train_stage2_dagger.sh     # DAgger stage-3 per-arm per-seed
 ├── checkpoints/
-│   └── sft_24_tot_merged/     # frozen feature extractor (Llama-3.1-8B-Instruct + SFT LoRA merged)
+│   ├── sft_24_tot_merged/             # frozen feature extractor
+│   ├── head_{manifold}_{loss}/        # stage-1 heads
+│   └── dagger_stage2_{head_tag}/{arm_s{seed}}/
 └── results/
-    ├── head_eval/{manifold}_{loss}/   # stage-1 metrics + plots
-    └── hyp_stage2_{head_tag}/         # stage-2 metrics + generations
+    ├── head_eval/{manifold}_{loss}/
+    ├── hyp_stage2_{head_tag}/         # teacher-forced stage-2
+    └── dagger_stage2_{head_tag}/{arm_s{seed}}/
 ```
 
 Old v1 files (`train_plan_24.py`, `generate_24_plan.py`, `train_sft_24.py`, `train_stage1.py`, …) remain in place as reference — not deleted so prior `results/` stay reproducible.

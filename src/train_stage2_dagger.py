@@ -286,6 +286,7 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
 
 
 def setup_distributed():
+    from datetime import timedelta
     distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if torch.cuda.is_available():
@@ -294,7 +295,13 @@ def setup_distributed():
     else:
         device = torch.device("cpu")
     if distributed:
-        dist.init_process_group(backend="nccl", device_id=device)
+        # Longer NCCL collective timeout (60 min) to tolerate rank imbalance
+        # during variable-length rollout phases. Default 10 min triggers on
+        # long-running runs.
+        dist.init_process_group(
+            backend="nccl", device_id=device,
+            timeout=timedelta(minutes=60),
+        )
         rank = dist.get_rank()
         world_size = dist.get_world_size()
     else:
