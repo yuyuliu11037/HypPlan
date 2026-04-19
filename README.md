@@ -198,35 +198,6 @@ See the headline table at the top. Key numbers:
   z > noz on 3/3 seeds.
 - Total lift over SFT: **+29pp** (0.12 → 0.41).
 
-### Hyperbolic vs Euclidean ablation
-
-To test whether the lift requires *hyperbolic* geometry specifically or just
-any compressed MLP summary of the hidden state, we swapped the Poincaré head
-for a Euclidean variant of identical architecture (same MLP widths, same
-`hyp_dim=32`, same `origin_ranking` loss — only the exp-map and distance
-function differ; `origin_distance = ‖z‖₂`, pairwise = L2). Same 3 DDP seeds.
-The `noz` run is reused unchanged (it never calls the head).
-
-| Quantity | Poincaré | Euclidean |
-|---|---|---|
-| z run mean ± std | **0.410 ± 0.020** | 0.330 ± 0.090 |
-| Δ (z − noz) mean ± std | **+7.7 ± 4.2 pp** | −0.3 ± 7.6 pp |
-| Seeds with positive Δ | 3/3 | 2/3 (seed 1234 → −9pp) |
-
-Poincaré beats Euclidean in mean z-run accuracy by ~8pp with less than half
-the variance, and is monotonically positive across seeds while Euclidean's
-lift is seed-dependent (one seed catastrophically worse than no-z at all).
-Paired t-test on `Δ_hyp − Δ_euc` per seed (+20, +6, −2): t≈1.25, df=2, p≈0.34
-— direction supports the geometry claim but **n=3 is insufficient for
-p<0.05**.
-
-Mechanistic hypothesis for Euclidean's instability: `origin_ranking` under
-L2 is scale-invariant (the margin inequality can be satisfied by arbitrary
-|z| scaling). Hyperbolic spaces bound distance growth naturally — Poincaré's
-distance scales logarithmically with Euclidean norm on the ball, avoiding
-unbounded drift. Seed 1234's catastrophic Euclidean result is consistent
-with per-seed landing in a bad scale regime.
-
 ### Components (files)
 
 - `src/oracle_24.py` — Given `remaining`, returns winning next-ops via a
