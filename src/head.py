@@ -69,7 +69,7 @@ class HyperbolicHead(nn.Module):
         in_dim: int,
         hyp_dim: int = 32,
         hidden_dims: list[int] | None = None,
-        manifold: Literal["poincare", "lorentz"] = "poincare",
+        manifold: Literal["poincare", "lorentz", "euclidean"] = "poincare",
         init_scale: float = 1e-3,
     ):
         super().__init__()
@@ -91,32 +91,37 @@ class HyperbolicHead(nn.Module):
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         """h: (..., in_dim) -> point on the manifold.
 
-        Poincaré: returns (..., hyp_dim).
-        Lorentz:  returns (..., hyp_dim + 1).
+        Poincaré:  returns (..., hyp_dim).
+        Lorentz:   returns (..., hyp_dim + 1).
+        Euclidean: returns (..., hyp_dim) — the raw MLP output; no exp-map.
         """
         v = self.mlp(h)
         if self.manifold == "poincare":
             return poincare_exp0(v)
         elif self.manifold == "lorentz":
             return exp_map_origin(v)
+        elif self.manifold == "euclidean":
+            return v
         else:
             raise ValueError(f"unknown manifold {self.manifold}")
 
     def distance(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Hyperbolic distance between two manifold points.
+        """Distance between two points in the chosen manifold.
 
         Inputs must come from this head's forward() (so they live in the
-        same manifold).
+        same manifold). Euclidean uses L2.
         """
         if self.manifold == "poincare":
             return poincare_distance(x, y)
         elif self.manifold == "lorentz":
             return lorentz_distance(x, y)
+        elif self.manifold == "euclidean":
+            return (x - y).norm(dim=-1)
         else:
             raise ValueError(f"unknown manifold {self.manifold}")
 
     def origin_distance(self, z: torch.Tensor) -> torch.Tensor:
-        """Hyperbolic distance from origin for each point in z."""
+        """Distance from origin for each point in z."""
         if self.manifold == "poincare":
             zero = torch.zeros_like(z)
             return poincare_distance(z, zero)
@@ -124,6 +129,8 @@ class HyperbolicHead(nn.Module):
             zero = torch.zeros_like(z)
             zero[..., 0] = 1.0
             return lorentz_distance(z, zero)
+        elif self.manifold == "euclidean":
+            return z.norm(dim=-1)
         else:
             raise ValueError(f"unknown manifold {self.manifold}")
 

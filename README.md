@@ -120,18 +120,12 @@ had no gradient pressure to use it. Under DAgger with free generation +
 oracle labels, z finally has decision-relevant signal the model can't
 trivially recompute from text context.
 
-**Head-attributable contribution is zero.** All z-injected runs (0.18–0.22) are
-statistically indistinguishable from the proper null baseline (0.21; Wilson CI
-≈ ±8pp on n=100). The ~9pp lift over SFT comes from "extra LoRA fine-tuning on
-more data," not from z. Value-probe diagnostics confirm this: the stage-1 head
-destroys most of the value information the raw LLM hidden state contains
-(R²=0.37 on non-leaf nodes → R²=0.04 after the 32-dim head bottleneck; see
-`results/value_probe/`). Even a purpose-built value-aware head
-(`origin_ranking`, non-leaf R²=0.065, |z|-vs-value Spearman=-0.23) failed to
-transmit any signal to stage-2 accuracy — evidence that the bottleneck is the
-stage-2 conditioning mechanism (single virtual-token injection, CE-only), not
-the stage-1 objective. See **Stage-3: DAgger with tree oracle** below for the
-fix being developed.
+**Head-attributable contribution (teacher-forced stage-2) was zero.** All
+z-injected runs (0.18–0.22) were statistically indistinguishable from the
+proper null baseline (0.21). The ~9pp lift over SFT came from "extra LoRA
+fine-tuning on more data," not from z. See **Stage-3: DAgger with tree
+oracle** below for the fix — under free-generation training with oracle
+labels, z finally transmits a real signal.
 
 Stage-1 grid (Spearman rank correlation of `d_hyp` vs `d_tree` on held-out test trees):
 
@@ -144,19 +138,12 @@ Stage-1 grid (Spearman rank correlation of `d_hyp` vs `d_tree` on held-out test 
 
 Distortion MSE beats Nickel-Kiela ranking by a wide margin on these shallow (depth ≤ 4) trees — ranking negatives sampled uniformly from all nodes don't force the head to reproduce long-range distances.
 
-The new `origin_ranking` loss (added after negative stage-2 results) explicitly
+The `origin_ranking` loss (added after negative stage-2 results) explicitly
 trains `|z|` to rank by solution-proximity. Target `v(s)` = BFS edge distance
 from `s` to nearest success leaf in the enumerated tree. For any sampled pair
 `(s_i, s_j)` with `v(s_i) < v(s_j)`, hinge loss
-`max(0, d_H(z_i, 0) − d_H(z_j, 0) + margin)`. Value-probe improvement:
-
-| Head | non-leaf R² | Spearman(\|z\|, value) |
-|---|---|---|
-| Raw LLM hidden (ceiling)       | 0.367 | —     |
-| Lorentz distortion             | 0.040 | -0.09 |
-| Lorentz origin_ranking         | 0.068 | -0.23 |
-| Poincaré distortion            | 0.026 | -0.10 |
-| Poincaré origin_ranking        | 0.065 | -0.23 |
+`max(0, d_H(z_i, 0) − d_H(z_j, 0) + margin)`. This head is the one used
+downstream by Stage 3 (DAgger).
 
 ---
 

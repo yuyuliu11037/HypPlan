@@ -124,15 +124,27 @@ def render_state_from_history(problem: str, history: tuple) -> str:
     Same format as render_state() but doesn't require a Tree/TreeNode object.
     Useful during stage-2 training where we walk through a trajectory step by
     step and need the canonical state text at each boundary.
+
+    Defensive against invalid history: if a step references an operand not in
+    the current pool (e.g. model emitted a hallucinated number), the history
+    is silently truncated at the last valid step. The returned text reflects
+    the longest valid prefix.
     """
     problem_nums = " ".join(fraction_to_str(Fraction(int(x)))
                             for x in problem.split(","))
     lines = [f"Problem: {problem_nums}"]
     pool = [Fraction(int(x)) for x in problem.split(",")]
+    valid_history = []
     for i, (a, op, b, r) in enumerate(history):
+        if a not in pool:
+            break
         pool.remove(a)
+        if b not in pool:
+            pool.append(a)  # restore so output reflects state before this step
+            break
         pool.remove(b)
         pool.append(r)
+        valid_history.append((a, op, b, r))
         pool_sorted = sorted(pool)
         step_str = f"{fraction_to_str(a)} {op} {fraction_to_str(b)} = {fraction_to_str(r)}"
         is_last = (i == len(history) - 1)
