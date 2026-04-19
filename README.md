@@ -95,9 +95,7 @@ All runs default to 100 held-out test problems from `data/24_test_tot.jsonl`. Sc
 ## Results so far (100 problems, greedy decoding, ≤3 z-injections)
 
 All Stage-2 numbers below are reported as **mean ± stdev across 3 DDP seeds
-(1234, 4242, 6666)**; 2-GPU DDP is the regime used for all reported Stage-2
-values because single-GPU runs showed ~3× higher seed variance (see
-*Single-GPU vs DDP* below).
+(1234, 4242, 6666)** on 2-GPU DDP.
 
 | System | Accuracy | Notes |
 |---|---|---|
@@ -106,15 +104,6 @@ values because single-GPU runs showed ~3× higher seed variance (see
 | **Stage-2 + Poincaré z (3-seed mean)** | **0.410 ± 0.020** | `results/dagger_stage2_poincare_origin_ranking/z_s*/` |
 | **Stage-2 + Euclidean z (3-seed mean)** | 0.330 ± 0.090 | `results/dagger_stage2_euclidean_origin_ranking/z_s*/` |
 
-**Stage-2 headline (DDP, n=3 seeds):**
-
-| Quantity | Value |
-|---|---|
-| No-z → with-z Δ (Poincaré), paired | **+7.7 ± 4.2 pp** (+11, +9, +3 per seed) |
-| No-z → with-z Δ (Euclidean), paired | −0.3 ± 7.6 pp (−9, +3, +5) |
-| SFT → Stage-2 no-z (exposure-bias fix) | +21.3 pp |
-| SFT → Stage-2 + Poincaré z (total) | +29.0 pp |
-
 Per-seed raw numbers (DDP):
 
 | Seed | noz | z (Poincaré) | Δ_hyp | z (Euclidean) | Δ_euc |
@@ -122,15 +111,6 @@ Per-seed raw numbers (DDP):
 | 1234 | 0.32 | 0.43 | +11 | 0.23 | **−9** |
 | 4242 | 0.32 | 0.41 | +9 | 0.35 | +3 |
 | 6666 | 0.36 | 0.39 | +3 | 0.41 | +5 |
-
-**Single-GPU vs DDP.** We originally ran seed 1234 with 2-GPU DDP and three
-more seeds on single-GPU. The single-GPU regime showed *much* higher
-seed variance (noz = 0.18 / 0.21 / 0.35, range 17pp) because batch_size=1
-makes per-step gradient noise 2× higher, and the single-GPU run does 2× as
-many optimizer steps to process the same data. We therefore rely on the
-3-seed DDP numbers as the headline; single-GPU numbers are kept only for
-completeness under `results/dagger_stage2_poincare_origin_ranking/{noz_s2024,
-z_s2024, noz_s7777, z_s7777, noz_s9999, z_s9999}/`.
 
 ---
 
