@@ -30,8 +30,6 @@ At each epoch, for each training problem:
 
 The canonical state text for each boundary passes through frozen base + frozen head → `z`; up-projector produces `z_inj` injected before the next step's tokens. Loss is single-winner CE (phase 1); phase-2 upgrade would be log-of-sum over all winners' step-text likelihoods.
 
-**Why DAgger and not teacher forcing?** Our initial teacher-forced attempt landed at null-baseline accuracy because `z` was informationally redundant with the teacher-forced context. See *Why not teacher forcing?* below.
-
 ---
 
 ## Pipeline end-to-end
@@ -114,7 +112,7 @@ Per-seed raw numbers (DDP):
 
 ---
 
-## Why not teacher forcing? (motivation)
+## Why not teacher forcing?
 
 Our initial Stage-2 design trained the LoRA on **teacher-forced** trajectories
 — injecting `z` at step boundaries and optimizing standard next-token CE. That
@@ -153,13 +151,7 @@ on/off. This isolates z's contribution from the exposure-bias fix, both of
 which independently should raise accuracy. The clean metric:
 `Δ_accuracy = acc(z run) − acc(no-z run)`.
 
-### Warm start (critical design choice)
-
-**Do NOT warm-start from the failed teacher-forced checkpoints.** Our
-null-baseline evidence shows those LoRAs learned z's distribution as a
-calibration signal, not its content. Starting from them would inherit
-attention patterns that route *around* z's semantic content — exactly the
-local minimum DAgger needs to escape.
+### Warm start
 
 Warm start from:
 - SFT-merged base (frozen) — already hits 0.12 accuracy.
@@ -186,17 +178,6 @@ from scratch.
 5. Lockstep DAgger: per epoch, rollout all 1090 train problems (3 trajectories
    each ≈ 3300 trajectories), then one CE pass over collected pairs. Repeat
    for 3 epochs. Both runs execute in parallel.
-
-### Results summary
-
-See the headline table at the top. Key numbers:
-
-- **Stage-2 no-z alone**: 0.333 ± 0.019 — +21pp over the 0.12 SFT baseline.
-  This is the exposure-bias fix: training on model-reached states teaches
-  recovery behavior that teacher forcing can't.
-- **Stage-2 + Poincaré z**: 0.410 ± 0.020 — adds **+7.7 ± 4.2pp** on top,
-  z > noz on 3/3 seeds.
-- Total lift over SFT: **+29pp** (0.12 → 0.41).
 
 ### Components (files)
 
@@ -277,3 +258,174 @@ Stage-2 (DAgger) DDP uses **manual gradient averaging** rather than `torch.nn.pa
 Why not standard DDP? Stage-2's computation graph changes per iteration (variable-K per-boundary inner loop, plus `disable_adapter()` sub-forwards for state encoding). That makes DDP's bucket-ready ordering diverge across ranks and deadlock the first auto-reduce. Manual averaging sidesteps the problem; the sync cost is trivial for our ~22M trainable params.
 
 NCCL topology gotcha on this host: GPUs 5↔7 are a broken pair at the NCCL level (works pair-wise with other GPUs; deadlocks when both are in the same process group). If you must use all 8 GPUs, verify with `scripts/test_nccl.sh`-style probe first.
+
+---
+
+## Roadmap and progress
+
+Short-term decisions tracked here so context isn't lost across sessions.
+
+### Current focus: rebuild on Qwen-2.5-14B-Instruct as the shared base
+
+After running few-shot validation on several candidates:
+
+| Model (greedy + 3-shot Game-24) | Accuracy | Format rate |
+|---|---|---|
+| Llama-3.1-8B-Instruct | 3% | 96% |
+| Qwen-2.5-7B-Instruct | 0% (verified earlier by user) | — |
+| Llama-3.1-8B-SFT (our trained checkpoint) | 12% | ~100% |
+| **Qwen-2.5-14B-Instruct** | **11%** | **100%** |
+
+Qwen-2.5-14B-Instruct matches SFT-8B accuracy at zero SFT cost and gives a
+clean "same base as ToT" story. The pivot: both HypPlan and the ToT baseline
+will use `Qwen/Qwen2.5-14B-Instruct` as the frozen base. This lets us skip
+the SFT preprocessing step and compare like-for-like against ToT.
+
+Few-shot validator: [scripts/fewshot_baseline.py](scripts/fewshot_baseline.py)
++ [scripts/run_fewshot_baseline.sh](scripts/run_fewshot_baseline.sh).
+
+### Three experiments (1 seed each, multi-seed comes later)
+
+All three use `Qwen/Qwen2.5-14B-Instruct` as the frozen base model.
+
+**1. Qwen-14B + HypPlan (stage 1 + stage 2) on Game-24.**
+   - Regenerate `data/trees_qwen14b/` using Qwen hidden states
+     (`hidden_dim=5120`, ~40 GB cache expected).
+   - Train stage-1 head on new cache (unchanged `origin_ranking` loss,
+     edge-count v).
+   - Stage-2 DAgger rolls out from Qwen + 3-shot prompting (no SFT). The
+     few-shot demo serves the bootstrap role that SFT used to serve.
+   - Artifacts:
+     `checkpoints/head_qwen14b_origin_ranking/`,
+     `checkpoints/dagger_stage2_qwen14b_origin_ranking/`,
+     `results/dagger_stage2_qwen14b_origin_ranking/`.
+
+**2. Qwen-14B + ToT on Game-24.**
+   - Plug Qwen-14B into [src/tot_baseline.py](src/tot_baseline.py) for both
+     generator and evaluator (single model, both roles).
+   - Paper-default ToT hyperparams (`n_generate=1`, `n_evaluate=3`,
+     `n_select=5`, `T=0.7`).
+   - Report both any-of-top-5 and top-1 accuracy on the same 100 test
+     problems (ToT paper's 900-999 split, verified overlap with
+     `data/24_test_tot.jsonl`).
+   - Artifacts: `results/tot_baseline_qwen14b/seed_1234/`.
+
+**3. Qwen-14B + HypPlan (stage 1 + stage 2) on Countdown.**
+   - Regenerate `data/cd_trees_qwen14b/` using Qwen hidden states.
+   - Write `src/train_head_cd.py` — port of stage-1 trainer for Countdown
+     with **rank-based margin loss**: sort v per-tree, sample pairs by
+     rank, unit margin. Scale-invariant (v ranges 0 to ~3M; raw margin
+     wouldn't work).
+   - Port stage-2 DAgger to Countdown: new oracle wiring
+     (`src/oracle_cd.py`), integer-arithmetic rollout parser, 5-step
+     trajectories, variable target in prompt, EOS enforcement at step 5.
+   - Gate: before the full DAgger run, measure the fraction of rollout
+     steps that land in the game's valid state space. If <30% even after
+     EOS enforcement, halt and diagnose.
+
+### Completed so far (Game-24 legacy, Llama-based)
+
+Preserved for reference; the paper narrative will use the Qwen-14B numbers
+once they land.
+
+| System | Accuracy | Base | Notes |
+|---|---|---|---|
+| SFT-only | 0.12 | Llama-3.1-8B + SFT | `results/24_sft_tot/` |
+| Stage-2 DAgger no-z (control) | 0.333 ± 0.019 | Llama-3.1-8B + SFT | 3-seed DDP, kept as historical |
+| Stage-2 DAgger + Poincaré z | 0.410 ± 0.020 | Llama-3.1-8B + SFT | 3-seed DDP, kept as historical |
+
+### Earlier focus (superseded): Game-24 ToT baseline
+
+**Goal:** add a competitive search-based baseline at matched base-model
+capability (Llama-3.1-8B, not GPT-4), so our 0.41 HypPlan number has a
+fair point of comparison on the same 100 test problems (which are exactly
+the ToT paper's 900-999 split — verified).
+
+**Setup:**
+- Generator = `checkpoints/sft_24_tot_merged` (our SFT; matches HypPlan's base).
+- Evaluator = `meta-llama/Llama-3.1-8B-Instruct` (base, no SFT — our SFT
+  distribution can't emit `sure/likely/impossible` labels).
+- ToT hyperparams: paper-default (`n_generate_sample=1`,
+  `n_evaluate_sample=3`, `n_select_sample=5`, `T=0.7`, BFS depth 3).
+- Prompts: paper-verbatim from
+  [ToT repo](https://github.com/princeton-nlp/tree-of-thought-llm).
+- Dual-format parser: accepts either ToT format (`"a + b = c (left: x y z)"`)
+  or SFT-leaked format (`"Step N: a + b = c. Remaining: x y z"`).
+- Report: both best-of-5 (any-of-final-beam correct; matches the paper's
+  74%) and best-of-1 (top-score only; matches our greedy eval convention).
+- Seeds: 3 for stability.
+
+**Companion run for fairness:** also run HypPlan best-of-5 (T=0.7, 5
+attempts, any-correct) on the same 100 problems so the "best-of-5 column"
+is apples-to-apples between ToT and HypPlan.
+
+**Files to create:**
+- `src/tot_baseline.py` — BFS runner (two-model setup, staged loading).
+- `scripts/run_tot_baseline.sh` — launcher.
+- `results/tot_baseline/{seed_*}/{generations.jsonl, metrics.json}`.
+
+### After Game-24 ToT lands: Countdown continuation
+
+Countdown port is in progress. Data and SFT pipelines are done; stage-1 and
+stage-2 still need to be wired.
+
+**Countdown — done:**
+1. Oracle (`src/oracle_cd.py`) with variable target, integer ops
+   (non-negative subtraction, exact division); offline cache at
+   `data/cd_oracle_cache/` (18 MB).
+2. Problem generator (`data/generate_countdown.py`) — 1000/100/100 solvable
+   problems with N=6 pool (5 small ∪ 1 big) and target ∈ [100, 999].
+3. SFT trajectories (`data/generate_cd_trajectories.py`, `data/cd_*_sft.jsonl`).
+4. Countdown SFT (`src/train_sft_cd.py`, `configs/sft_cd.yaml`,
+   `scripts/run_sft_cd.sh`) trained with QLoRA 5 epochs 2-GPU DDP; baseline
+   **1% accuracy** (matches the SOS literature's 1-5% range).
+5. Merged checkpoint (`checkpoints/sft_cd_merged`, 15 GB).
+6. Tree-data generation (`src/tree_data_cd.py`,
+   `data/generate_tree_data_cd.py`, `scripts/run_gen_tree_data_cd.sh`) —
+   `data/cd_trees/` (7.6 GB, 1000+200 trees with hidden states).
+7. v-value redefined to **continuous `|final_value − target|`** (every state
+   gets a finite v, target-reachable states get v=0). `compute_v_values` in
+   `src/tree_data_cd.py` now enumerates the full DAG from root (not from
+   the oracle cache, which is incomplete because of can_reach early-return).
+
+**Countdown — pending:**
+1. Clean up v-values on the test split. Train/val got updated in place by
+   `data/recompute_v_values.py`; test failed because the guided-trajectory
+   logic change altered tree topology from what the saved hidden states
+   were built for. Options: (a) regenerate all trees from scratch (~1 hr
+   GPU), or (b) accept that stage-1 only trains on train+val and test is
+   eval-only with no v-value dependence.
+2. Stage-1 head training for Countdown: port `src/train_head.py` to read
+   `data/cd_trees/`, sample pairs from the new continuous v distribution
+   (reachable-aware), handle the scale (use `log(1+v)` or rank-based
+   margin to keep the hinge meaningful when v ranges 0–1M).
+3. Stage-1 evaluation: Spearman(|z|, v(s)), 2D viz adapted to Countdown.
+4. Stage-2 (DAgger) port for Countdown:
+   - Wire `src/oracle_cd.py` into `src/dagger_rollout.py` as the
+     target-aware oracle (current rollout uses `oracle_24` hard-coded).
+   - Integer-arithmetic rollout parser (operands can be 3+ digits, no
+     negative intermediates, exact division).
+   - New config `configs/stage2_dagger_cd.yaml`: `max_z_injections=5`,
+     `max_seq_len≥384`, target in prompt.
+   - EOS enforcement during rollout generation: stop at 5 parsed step
+     boundaries; otherwise SFT's 6-8-step drift will force-invalid most
+     trajectories.
+   - **Gate:** before full DAgger run, measure the fraction of rollout
+     steps that land in the game's valid state space (parseable +
+     operand-correct) on a smoke run. If that fraction is low even after
+     EOS enforcement, we need a stronger SFT base first.
+5. Stage-2 DAgger training (3 seeds, DDP); stage-2 eval and compare.
+6. (Optional) ToT-style baseline adapted for Countdown, if the method
+   transfers and we want the same fair comparison.
+
+### Open research questions / backlog
+
+- **Seeds for statistical significance.** Current hyperbolic-vs-Euclidean
+  gap is +7.7pp on 3 seeds (p ≈ 0.34). For publication-grade p<0.05 we'd
+  want n ≥ 5, ideally 10. Cheap to add.
+- **Phase-2 loss upgrade.** Replace single-winner CE with log-of-sum over
+  full step texts of all winners (≈K× compute). Not needed for current
+  numbers but cleaner theoretically.
+- **Approximate oracle for N > 6.** Exact oracle scales poorly past N=7
+  even in C++. Approximate critic (beam/MCTS or learned value) would be
+  the path to larger Countdown or other planning domains.

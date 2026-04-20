@@ -44,9 +44,11 @@ class TreeCacheDataset(Dataset):
         idx = self.indices[i]
         meta = torch.load(self.split_dir / f"problem_{idx}.pt", weights_only=False)
         hidden = np.load(self.split_dir / f"hidden_{idx}.npy")
-        return {
+        # Countdown caches store v_values (continuous |final - target|) and
+        # pool/target; Game-24 caches don't have these. Pass through if present.
+        out = {
             "idx": idx,
-            "problem": meta["problem"],
+            "problem": meta.get("problem", str(meta.get("pool", ""))),
             "n": int(meta["n"]),
             "parents": meta["parents"],
             "depths": meta["depths"],
@@ -54,6 +56,9 @@ class TreeCacheDataset(Dataset):
             "is_success": meta["is_success"],
             "hidden": hidden,  # float16 (n, H)
         }
+        if "v_values" in meta:
+            out["v_values"] = meta["v_values"]
+        return out
 
 
 def _collate_passthrough(batch):
@@ -155,6 +160,53 @@ def origin_ranking_loss(
 
     i_t = torch.as_tensor(i, device=z.device, dtype=torch.long)
     j_t = torch.as_tensor(j, device=z.device, dtype=torch.long)
+    d_i = head.origin_distance(z[i_t])
+    d_j = head.origin_distance(z[j_t])
+    return torch.relu(d_i - d_j + margin).mean()
+
+
+def origin_ranking_rank_loss(
+    head: HyperbolicHead, z: torch.Tensor,
+    v_raw: np.ndarray, n_pairs: int, margin: float, rng: random.Random,
+) -> torch.Tensor:
+    """Rank-based origin_ranking loss for wide-dynamic-range v (e.g. Countdown
+    where v = |final − target| can span 0 to millions).
+
+    Scale-invariant: sort v (reachable nodes only), sample pair indices,
+    enforce `d_H(z_i, 0) + margin <= d_H(z_j, 0)` when rank[i] < rank[j].
+    Strict rank ordering — ties (same v) are filtered out to keep the signal
+    clean.
+    """
+    valid_idx = np.where(v_raw >= 0)[0]
+    if len(valid_idx) < 2:
+        return torch.zeros((), device=z.device, requires_grad=True)
+
+    # Stable ascending sort by v; return the indices into the original array.
+    v_valid = v_raw[valid_idx]
+    order = valid_idx[np.argsort(v_valid, kind="stable")]
+    v_sorted = v_raw[order]  # ascending
+
+    # Sample rank pairs (a < b in sorted order)
+    m = len(order)
+    a = np.random.randint(0, m, size=n_pairs)
+    b = np.random.randint(0, m, size=n_pairs)
+    mask = a != b
+    if not mask.any():
+        return torch.zeros((), device=z.device, requires_grad=True)
+    a, b = a[mask], b[mask]
+    lo = np.minimum(a, b)
+    hi = np.maximum(a, b)
+    # Drop ties in raw v (same-rank pair provides no signal)
+    neq = v_sorted[lo] != v_sorted[hi]
+    if not neq.any():
+        return torch.zeros((), device=z.device, requires_grad=True)
+    lo, hi = lo[neq], hi[neq]
+
+    i_ids = order[lo]  # closer to target (smaller v, smaller |z|)
+    j_ids = order[hi]  # farther (larger v, larger |z|)
+
+    i_t = torch.as_tensor(i_ids, device=z.device, dtype=torch.long)
+    j_t = torch.as_tensor(j_ids, device=z.device, dtype=torch.long)
     d_i = head.origin_distance(z[i_t])
     d_j = head.origin_distance(z[j_t])
     return torch.relu(d_i - d_j + margin).mean()
@@ -267,7 +319,8 @@ def main():
 
     # Optim
     loss_name = config["training"]["loss"]
-    assert loss_name in ("distortion", "ranking", "origin_ranking")
+    assert loss_name in ("distortion", "ranking", "origin_ranking",
+                         "origin_ranking_rank")
     margin = float(config["training"].get("origin_ranking_margin", 1.0))
     lr = float(config["training"]["lr"])
     wd = float(config["training"].get("weight_decay", 1e-4))
@@ -326,12 +379,20 @@ def main():
                 loss = ranking_loss(
                     head_ref, z, item["parents"], n, num_negatives, rng,
                 )
-            else:  # origin_ranking
+            elif loss_name == "origin_ranking":
                 v_target = distance_to_nearest_solution(
                     item["parents"], item["is_success"],
                 )
                 loss = origin_ranking_loss(
                     head_ref, z, v_target, pairs_per_tree, margin, rng,
+                )
+            else:  # origin_ranking_rank (Countdown: continuous v, rank-based)
+                v_raw = item.get("v_values")
+                assert v_raw is not None, (
+                    "origin_ranking_rank requires v_values in tree meta "
+                    "(Countdown pipeline)")
+                loss = origin_ranking_rank_loss(
+                    head_ref, z, np.asarray(v_raw), pairs_per_tree, margin, rng,
                 )
 
             (loss / trees_per_batch).backward()

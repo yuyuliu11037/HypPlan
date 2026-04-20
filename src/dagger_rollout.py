@@ -24,6 +24,7 @@ from src.oracle_24 import (
     validate_step,
     winning_ops,
 )
+from src.prompt_builders import sft_prompt_24
 from src.tree_data import render_state_from_history
 
 
@@ -113,16 +114,26 @@ def _parse_history_from_text(step1_text: str) -> tuple:
 @torch.no_grad()
 def rollout_one(model, tokenizer, head, up_proj, problem: str, device,
                 use_z: bool = True, temperature: float = 0.7, top_p: float = 0.95,
-                max_new_tokens: int = 256, max_steps: int = 3) -> Rollout:
+                max_new_tokens: int = 256, max_steps: int = 3,
+                prompt_builder=None) -> Rollout:
     """Generate one trajectory with per-step oracle labels.
 
     `model` must be a PEFT-wrapped causal LM so `model.disable_adapter()`
     works (required to pull frozen-base features for z computation).
+
+    `prompt_builder(tokenizer, problem) -> (text, add_special_tokens)` lets
+    callers swap the SFT-style raw prompt for a chat-template few-shot prompt
+    (used with Qwen-14B base, see `src.prompt_builders`). Defaults to
+    `sft_prompt_24` for backward compatibility with Llama-SFT pipelines.
     """
     result = Rollout(problem=problem)
 
-    prompt = make_prompt(problem)
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    if prompt_builder is None:
+        prompt_builder = sft_prompt_24
+    prompt_text, add_special = prompt_builder(tokenizer, problem)
+    input_ids = tokenizer.encode(
+        prompt_text, add_special_tokens=add_special, return_tensors="pt",
+    ).to(device)
     prompt_len = input_ids.size(1)
 
     # Prime with the prompt.

@@ -85,43 +85,56 @@ def legal_transitions(remaining: tuple) -> list:
     return out
 
 
-def compute_v_values(oracle_cache: dict, target: int) -> dict:
-    """For every state in oracle_cache (and its size-1 successors), compute
-    v(state) = shortest number of legal ops to reach a success terminal.
-    Unreachable states get v = -1.
+def compute_v_values(pool: list[int], target: int) -> dict:
+    """For every state reachable from the root pool, compute
+    v(state) = the smallest |final_value - target| achievable by ANY
+    sequence of legal ops starting from `state`.
 
-    Size-1 terminals are NOT in oracle_cache (oracle_cd.can_reach early-returns
-    before caching), so we enumerate them on the fly from size-2 successors.
+    Range: 0 (state can reach target exactly) to |max_achievable - target|.
+    Every state in the full DAG gets a finite integer v.
+
+    Enumerates the DAG fresh from the root; does NOT rely on the oracle
+    cache (which early-terminates on first success and is therefore
+    incomplete — siblings of winning-path states are not in the cache).
     """
+    root = tuple(sorted(pool))
+
+    # 1. Enumerate all states reachable from root via legal ops.
+    all_states: set = set()
+    stack = [root]
+    while stack:
+        s = stack.pop()
+        if s in all_states:
+            continue
+        all_states.add(s)
+        if len(s) == 1:
+            continue
+        for _a, _sym, _b, _r, new_rem in legal_transitions(s):
+            if new_rem not in all_states:
+                stack.append(new_rem)
+
+    # 2. Terminal v = |value - target|.
     v: dict[tuple, int] = {}
+    for s in all_states:
+        if len(s) == 1:
+            v[s] = abs(int(s[0]) - int(target))
 
-    # Discover size-1 terminals as successors of any size-2 state
-    for s in oracle_cache:
-        if len(s) == 2:
-            for _a, _sym, _b, _r, new_rem in legal_transitions(s):
-                if len(new_rem) == 1 and new_rem not in v:
-                    v[new_rem] = 0 if new_rem[0] == target else -1
-
-    # Initialize non-terminals as unknown (will be filled below)
-    for s in oracle_cache:
-        if s not in v:
-            v[s] = -1
-
-    # Bottom-up pass by ascending size
+    # 3. Bottom-up by ascending size.
     states_by_size: dict[int, list] = {}
-    for s in v:
+    for s in all_states:
         states_by_size.setdefault(len(s), []).append(s)
 
+    INF = float("inf")
     for size in sorted(states_by_size.keys()):
         if size == 1:
-            continue  # already set
+            continue
         for s in states_by_size[size]:
-            best = -1
+            best = INF
             for _a, _sym, _b, _r, new_rem in legal_transitions(s):
-                nv = v.get(new_rem, -1)
-                if nv != -1 and (best == -1 or nv < best):
+                nv = v.get(new_rem, INF)
+                if nv < best:
                     best = nv
-            v[s] = -1 if best == -1 else best + 1
+            v[s] = int(best) if best != INF else -1
     return v
 
 
@@ -141,7 +154,7 @@ def sample_tree(pool: list[int], target: int, oracle_cache: dict,
     """
     rng = random.Random(seed)
     root_remaining = tuple(sorted(pool))
-    v_values = compute_v_values(oracle_cache, target)
+    v_values = compute_v_values(pool, target)
 
     nodes: list[CDNode] = []
     edge_to_child: dict[tuple, int] = {}
@@ -167,12 +180,16 @@ def sample_tree(pool: list[int], target: int, oracle_cache: dict,
             if not transitions:
                 break
             if guided:
-                winning = [tr for tr in transitions
-                           if v_values.get(tr[4], -1) != -1
-                           and v_values[tr[4]] < v_values.get(cur.remaining, 999)]
-                if not winning:
-                    break  # current state has no winning successor
-                a, sym, b, r, new_rem = rng.choice(winning)
+                # Greedy-on-v: pick among transitions that minimize v(next).
+                # Under continuous v, winning paths stay at v=0 throughout, so
+                # "strict descent" would wrongly reject them.
+                valid = [(tr, v_values.get(tr[4], -1)) for tr in transitions]
+                valid = [(tr, v) for (tr, v) in valid if v >= 0]
+                if not valid:
+                    break
+                best_v = min(v for _, v in valid)
+                winners = [tr for tr, v in valid if v == best_v]
+                a, sym, b, r, new_rem = rng.choice(winners)
             else:
                 a, sym, b, r, new_rem = rng.choice(transitions)
             edge_key = (cur_id, sym, a, b, r)
