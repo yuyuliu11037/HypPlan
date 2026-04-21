@@ -206,7 +206,7 @@ side-by-side on problem `4,5,6,10`).
 
 ---
 
-## Project layout (v2 files only)
+## Project layout
 
 ```
 HypPlan/
@@ -244,11 +244,11 @@ HypPlan/
     └── dagger_stage2_{head_tag}/{noz|z}_s{seed}/
 ```
 
-Old v1 files (`train_plan_24.py`, `generate_24_plan.py`, `train_sft_24.py`, `train_stage1.py`, `train_stage2.py` — the teacher-forced precursor, …) remain in place as reference — not deleted so prior `results/` stay reproducible.
+<!-- Old v1 files (`train_plan_24.py`, `generate_24_plan.py`, `train_sft_24.py`, `train_stage1.py`, `train_stage2.py` — the teacher-forced precursor, …) remain in place as reference — not deleted so prior `results/` stay reproducible. -->
 
----
+<!-- --- -->
 
-## Distributed training notes
+<!-- ## Distributed training notes
 
 Stage-2 (DAgger) DDP uses **manual gradient averaging** rather than `torch.nn.parallel.DistributedDataParallel`:
 
@@ -257,7 +257,7 @@ Stage-2 (DAgger) DDP uses **manual gradient averaging** rather than `torch.nn.pa
 
 Why not standard DDP? Stage-2's computation graph changes per iteration (variable-K per-boundary inner loop, plus `disable_adapter()` sub-forwards for state encoding). That makes DDP's bucket-ready ordering diverge across ranks and deadlock the first auto-reduce. Manual averaging sidesteps the problem; the sync cost is trivial for our ~22M trainable params.
 
-NCCL topology gotcha on this host: GPUs 5↔7 are a broken pair at the NCCL level (works pair-wise with other GPUs; deadlocks when both are in the same process group). If you must use all 8 GPUs, verify with `scripts/test_nccl.sh`-style probe first.
+NCCL topology gotcha on this host: GPUs 5↔7 are a broken pair at the NCCL level (works pair-wise with other GPUs; deadlocks when both are in the same process group). If you must use all 8 GPUs, verify with `scripts/test_nccl.sh`-style probe first. -->
 
 ---
 
