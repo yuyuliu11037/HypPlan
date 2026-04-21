@@ -17,12 +17,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ARM="${1:?usage: $0 <noz|z> [HEAD_TAG] [SEED]}"
-HEAD_TAG="${2:-poincare_origin_ranking}"
+HEAD_TAG="${2:-cd_qwen14b_rank}"
 SEED="${3:-}"
 MEM_THRESHOLD="${MEM_THRESHOLD:-30000}"
-MASTER_PORT="${MASTER_PORT:-29540}"
-BASE_CONFIG="${BASE_CONFIG:-configs/stage2_dagger.yaml}"
-RUN_CONFIG="${RUN_CONFIG:-configs/stage2_dagger_${HEAD_TAG}.yaml}"
+MASTER_PORT="${MASTER_PORT:-29550}"
+BASE_CONFIG="${BASE_CONFIG:-configs/stage2_dagger_cd_qwen14b.yaml}"
+RUN_CONFIG="${RUN_CONFIG:-configs/stage2_dagger_cd_${HEAD_TAG}_run.yaml}"
 
 if [ "$ARM" != "noz" ] && [ "$ARM" != "z" ]; then
   echo "ARM must be 'noz' or 'z', got '$ARM'" >&2
@@ -61,7 +61,7 @@ if [ -n "$SEED" ]; then
 fi
 
 python -m torch.distributed.run --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
-  -m src.train_stage2_dagger --config "$RUN_CONFIG" $USE_Z_FLAG $SEED_FLAG --arm_tag "$ARM_SUFFIX"
+  -m src.train_stage2_dagger_cd --config "$RUN_CONFIG" $USE_Z_FLAG $SEED_FLAG --arm_tag "$ARM_SUFFIX"
 
 # Generate + evaluate (single GPU — the first visible one)
 CKPT_ROOT=$(python -c "import yaml; print(yaml.safe_load(open('$RUN_CONFIG'))['training']['output_dir'])")
@@ -75,12 +75,12 @@ if [ "$ARM" = "noz" ]; then EXTRA="--no_z_inject"; fi
 
 echo "=== generating arm=$ARM_SUFFIX ==="
 CUDA_VISIBLE_DEVICES=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print $1}') \
-  python -m src.generate_24_stage2 \
+  python -m src.generate_cd_stage2 \
     --stage2_checkpoint "$CKPT" \
     --test_data "$TEST" \
     --output "$RES/generations.jsonl" $EXTRA
 
-python -m src.evaluate_24 \
+python -m src.evaluate_cd \
   --input "$RES/generations.jsonl" \
   --output "$RES/metrics.json"
 

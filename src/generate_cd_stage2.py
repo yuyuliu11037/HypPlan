@@ -20,28 +20,25 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.head import HyperbolicHead, UpProjector
-from src.dataset_24 import make_prompt
-from src.prompt_builders import get_builder_24, sft_prompt_24
+from src.prompt_builders import get_builder_cd, sft_prompt_cd
 from src.dataset_24_stage2 import STEP_RE
-from src.tree_data import render_state_from_history
-from fractions import Fraction
+from src.tree_data_cd import render_state_from_history
 
 
 _boundary_re = re.compile(r"\nStep \d+:")
 
 
 def history_from_generation(gen_text: str) -> tuple:
-    """Parse the generated text so far into a history tuple of (a, op, b, r)."""
+    """Parse Countdown integer-arithmetic steps from generated text."""
     hist = []
     for m in STEP_RE.finditer(gen_text):
         try:
-            a = Fraction(m.group(1))
+            a = int(m.group(1))
             op = m.group(2)
-            b = Fraction(m.group(3))
-            r_str = m.group(4).rstrip(".")
-            r = Fraction(r_str)
+            b = int(m.group(3))
+            r = int(m.group(4).rstrip("."))
             hist.append((a, op, b, r))
-        except (ValueError, ZeroDivisionError):
+        except (ValueError, TypeError):
             continue
     return tuple(hist)
 
@@ -89,43 +86,37 @@ def load_all(
 
 
 @torch.no_grad()
-def compute_z_inj(model, tokenizer, head, up_proj, problem: str, history: tuple,
+def compute_z_inj(model, tokenizer, head, up_proj,
+                   pool: list, target: int, history: tuple,
                    device, random_z: bool = False) -> torch.Tensor:
-    """Render canonical state, get hidden from base (LoRA disabled), head + up_proj."""
+    """Render canonical Countdown state, get hidden from base (LoRA disabled),
+    head + up_proj."""
     if random_z:
         hidden_dim = head.mlp[0].in_features
         g = torch.randn(1, hidden_dim, device=device)
         return g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
 
-    state_text = render_state_from_history(problem, history)
+    state_text = render_state_from_history(list(pool), target, history)
     ids = tokenizer.encode(state_text, add_special_tokens=True, return_tensors="pt").to(device)
     with model.disable_adapter():
         out = model(input_ids=ids, output_hidden_states=True)
-        last_h = out.hidden_states[-1][:, -1, :]   # (1, H)
+        last_h = out.hidden_states[-1][:, -1, :]
     z_hyp = head(last_h.float())
     z_inj = up_proj(z_hyp)
-    return z_inj   # (1, H)
+    return z_inj
 
 
 @torch.no_grad()
-def generate(model, tokenizer, head, up_proj, problem: str,
-              max_new_tokens: int = 256, temperature: float = 0.0,
+def generate(model, tokenizer, head, up_proj,
+              pool: list, target: int,
+              max_new_tokens: int = 512, temperature: float = 0.0,
               device: str = "cuda", random_z: bool = False,
-              max_z_injections: int = 3, no_z_inject: bool = False,
+              max_z_injections: int = 5, no_z_inject: bool = False,
               prompt_builder=None) -> str:
-    """Autoregressive generation with optional z-injection at step boundaries.
-
-    `no_z_inject=True` disables z injection entirely — use when the stage-2
-    model (e.g. the DAgger no-z arm) was trained without ever seeing z, so
-    evaluating with any injection would be a distribution mismatch.
-
-    `prompt_builder(tokenizer, problem) -> (text, add_special_tokens)` — when
-    None, defaults to SFT-style raw completion prompt. Pass
-    `fewshot_chat_prompt_24` when evaluating a Qwen-base model.
-    """
+    """Autoregressive Countdown generation with optional z-injection."""
     if prompt_builder is None:
-        prompt_builder = sft_prompt_24
-    prompt_text, add_special = prompt_builder(tokenizer, problem)
+        prompt_builder = sft_prompt_cd
+    prompt_text, add_special = prompt_builder(tokenizer, pool, target)
     input_ids = tokenizer.encode(
         prompt_text, add_special_tokens=add_special, return_tensors="pt",
     ).to(device)
@@ -142,7 +133,7 @@ def generate(model, tokenizer, head, up_proj, problem: str,
 
     # z before Step 1 uses empty history
     if not no_z_inject and injection_count < max_z_injections:
-        z1 = compute_z_inj(model, tokenizer, head, up_proj, problem,
+        z1 = compute_z_inj(model, tokenizer, head, up_proj, pool, target,
                             history=tuple(), device=device, random_z=random_z)
         out_z = model(inputs_embeds=z1.unsqueeze(1).to(next(model.parameters()).dtype),
                        past_key_values=past, use_cache=True)
@@ -200,7 +191,7 @@ def generate(model, tokenizer, head, up_proj, problem: str,
                 hist_text = "Step 1:" + full_gen
                 hist = history_from_generation(hist_text)
                 pending_z = compute_z_inj(model, tokenizer, head, up_proj,
-                                           problem, history=hist, device=device,
+                                           pool, target, history=hist, device=device,
                                            random_z=random_z)
                 injection_count += 1
             prev_boundary_count = cur_count
@@ -231,7 +222,7 @@ def main():
     # Honor prompt_style from the training config so eval uses the same
     # prompt distribution the LoRA was trained under.
     prompt_style = str(s2cfg.get("training", {}).get("prompt_style", "sft"))
-    prompt_builder = get_builder_24(prompt_style)
+    prompt_builder = get_builder_cd(prompt_style)
     print(f"prompt_style={prompt_style}")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -241,9 +232,11 @@ def main():
     with open(args.test_data) as f:
         for line in f:
             item = json.loads(line)
-            if item["problem"] not in seen:
-                seen.add(item["problem"])
-                records.append(item)
+            key = (tuple(sorted(item["pool"])), item["target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(item)
     if args.limit > 0:
         records = records[: args.limit]
     print(f"Loaded {len(records)} unique problems from {args.test_data}")
@@ -260,7 +253,8 @@ def main():
     with open(args.output, "w") as fout:
         for i, record in enumerate(records):
             gen = generate(
-                model, tokenizer, head, up_proj, record["problem"],
+                model, tokenizer, head, up_proj,
+                record["pool"], record["target"],
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 device=device,
@@ -269,7 +263,8 @@ def main():
                 max_z_injections=args.max_z_injections,
                 prompt_builder=prompt_builder,
             )
-            out = {"problem": record["problem"],
+            out = {"pool": record["pool"], "target": record["target"],
+                   "problem_idx": record.get("problem_idx"),
                    "ground_truth": record["text"],
                    "generation": gen}
             fout.write(json.dumps(out) + "\n"); fout.flush()

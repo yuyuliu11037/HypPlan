@@ -288,40 +288,64 @@ Few-shot validator: [scripts/fewshot_baseline.py](scripts/fewshot_baseline.py)
 
 All three use `Qwen/Qwen2.5-14B-Instruct` as the frozen base model.
 
+Code plumbing that supports all three:
+- [src/prompt_builders.py](src/prompt_builders.py) — `sft_prompt_24`,
+  `fewshot_chat_prompt_24`, `sft_prompt_cd`, `fewshot_chat_prompt_cd`.
+  Each builder returns `(text, add_special_tokens)` so chat-template
+  prompts don't double-add BOS.
+- `src/train_head.py` now supports `origin_ranking_rank` loss (scale-
+  invariant rank-based margin for wide-range Countdown v).
+- `src/dagger_rollout.py` / `src/train_stage2_dagger.py` /
+  `src/generate_24_stage2.py` thread `prompt_builder` through rollout,
+  training and inference. Config key: `training.prompt_style`
+  (`"sft"` or `"fewshot"`).
+
 **1. Qwen-14B + HypPlan (stage 1 + stage 2) on Game-24.**
-   - Regenerate `data/trees_qwen14b/` using Qwen hidden states
-     (`hidden_dim=5120`, ~40 GB cache expected).
-   - Train stage-1 head on new cache (unchanged `origin_ranking` loss,
-     edge-count v).
-   - Stage-2 DAgger rolls out from Qwen + 3-shot prompting (no SFT). The
-     few-shot demo serves the bootstrap role that SFT used to serve.
-   - Artifacts:
-     `checkpoints/head_qwen14b_origin_ranking/`,
-     `checkpoints/dagger_stage2_qwen14b_origin_ranking/`,
-     `results/dagger_stage2_qwen14b_origin_ranking/`.
+   - Tree cache: `bash scripts/run_gen_tree_data.sh` with
+     `BASE_MODEL=Qwen/Qwen2.5-14B-Instruct OUT_DIR=data/trees_qwen14b
+     LOG_DIR=logs/gen_tree_qwen14b BATCH_SIZE=32`. In progress; 1090
+     train + 136 val + 136 test problems.
+   - Stage-1 head: `configs/head_qwen14b_origin_ranking.yaml` →
+     `bash scripts/run_train_head.sh poincare origin_ranking` after
+     pointing BASE_CONFIG to the new config, or invoke
+     `python -m src.train_head --config configs/head_qwen14b_origin_ranking.yaml`
+     + `python -m src.eval_head --config ...`.
+   - Stage-2 DAgger: `configs/stage2_dagger_qwen14b.yaml` (sets
+     `prompt_style: fewshot`). Launch:
+     `BASE_CONFIG=configs/stage2_dagger_qwen14b.yaml
+      RUN_CONFIG=configs/stage2_dagger_qwen14b_run.yaml
+      bash scripts/run_train_stage2_dagger.sh z qwen14b_origin_ranking 1234`
+     (and similarly for `noz`).
+   - Artifacts: `checkpoints/head_qwen14b_origin_ranking/`,
+     `checkpoints/dagger_stage2_qwen14b_origin_ranking/{z,noz}_s1234/`,
+     `results/dagger_stage2_qwen14b_origin_ranking/{z,noz}_s1234/`.
 
 **2. Qwen-14B + ToT on Game-24.**
-   - Plug Qwen-14B into [src/tot_baseline.py](src/tot_baseline.py) for both
-     generator and evaluator (single model, both roles).
-   - Paper-default ToT hyperparams (`n_generate=1`, `n_evaluate=3`,
-     `n_select=5`, `T=0.7`).
-   - Report both any-of-top-5 and top-1 accuracy on the same 100 test
-     problems (ToT paper's 900-999 split, verified overlap with
-     `data/24_test_tot.jsonl`).
+   - `bash scripts/run_tot_qwen14b.sh` — single-model ToT
+     (`--shared_model --use_chat_template`, paper-default
+     `n_generate=1, n_evaluate=3, n_select=5, T=0.7`).
+   - Reports both any-of-top-5 (matches ToT paper's 74% metric) and
+     top-1 accuracy. Overlap with `data/24_test_tot.jsonl` is 100/100.
    - Artifacts: `results/tot_baseline_qwen14b/seed_1234/`.
 
 **3. Qwen-14B + HypPlan (stage 1 + stage 2) on Countdown.**
-   - Regenerate `data/cd_trees_qwen14b/` using Qwen hidden states.
-   - Write `src/train_head_cd.py` — port of stage-1 trainer for Countdown
-     with **rank-based margin loss**: sort v per-tree, sample pairs by
-     rank, unit margin. Scale-invariant (v ranges 0 to ~3M; raw margin
-     wouldn't work).
-   - Port stage-2 DAgger to Countdown: new oracle wiring
-     (`src/oracle_cd.py`), integer-arithmetic rollout parser, 5-step
-     trajectories, variable target in prompt, EOS enforcement at step 5.
-   - Gate: before the full DAgger run, measure the fraction of rollout
-     steps that land in the game's valid state space. If <30% even after
-     EOS enforcement, halt and diagnose.
+   - Tree cache (Qwen Countdown): `bash scripts/run_gen_tree_data_cd.sh`
+     with `BASE_MODEL=Qwen/Qwen2.5-14B-Instruct
+     OUT_DIR=data/cd_trees_qwen14b
+     LOG_DIR=logs/gen_tree_cd_qwen14b`.
+   - Stage-1 head: `configs/head_cd_qwen14b_rank.yaml`
+     (`loss: origin_ranking_rank` — scale-invariant rank-based margin).
+     Launch `python -m src.train_head --config
+     configs/head_cd_qwen14b_rank.yaml`.
+   - Stage-2 DAgger: `configs/stage2_dagger_cd_qwen14b.yaml`. Launch
+     `bash scripts/run_train_stage2_dagger_cd.sh z cd_qwen14b_rank 1234`.
+     Code: [src/dagger_rollout_cd.py](src/dagger_rollout_cd.py) (integer
+     arithmetic, variable target, 5 steps, `CountdownOracle` per problem),
+     [src/train_stage2_dagger_cd.py](src/train_stage2_dagger_cd.py),
+     [src/generate_cd_stage2.py](src/generate_cd_stage2.py).
+   - Gate: after epoch-0 rollout, check stats['n_boundaries_invalid'] /
+     stats['n_boundaries_total']. If >50%, SFT-free bootstrap is too
+     weak — fall back to SFT'd Countdown base.
 
 ### Completed so far (Game-24 legacy, Llama-based)
 

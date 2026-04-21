@@ -1,0 +1,29 @@
+data:
+  test_data: data/cd_test_sft.jsonl
+  train_data: data/cd_train_sft.jsonl
+  train_limit: -1
+eval:
+  max_new_tokens: 512
+  max_z_injections: 5
+  output_dir: results/dagger_stage2_cd_qwen14b_rank
+  temperature: 0.0
+model:
+  base_model: Qwen/Qwen2.5-14B-Instruct
+  head_checkpoint: checkpoints/head_cd_qwen14b_rank/head.pt
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_r: 16
+  up_proj_hidden: 2048
+training:
+  epochs: 3
+  grad_clip: 1.0
+  lr: 0.0001
+  max_steps: 5
+  output_dir: checkpoints/dagger_stage2_cd_qwen14b_rank
+  prompt_style: fewshot
+  rollout_max_new_tokens: 512
+  rollout_temperature: 0.7
+  rollout_top_p: 0.95
+  rollouts_per_problem: 3
+  seed: 1234
+  weight_decay: 0.0

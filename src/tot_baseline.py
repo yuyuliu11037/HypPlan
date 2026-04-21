@@ -92,6 +92,19 @@ impossible
 
 # --- Parsing ---
 
+# Chat models (Qwen-Instruct etc.) often emit prose with backticks around code
+# and use "leaving" instead of "left". Normalize before regex.
+def _normalize_cand_text(text: str) -> str:
+    t = text
+    # Drop backticks and asterisks (markdown emphasis)
+    t = t.replace("`", "").replace("**", "").replace("*", "*")
+    # "leaving" → "left" so we only need one keyword
+    t = re.sub(r"\(leaving:", "(left:", t, flags=re.IGNORECASE)
+    t = re.sub(r"\(remaining:", "(left:", t, flags=re.IGNORECASE)
+    t = re.sub(r"\(left over:", "(left:", t, flags=re.IGNORECASE)
+    return t
+
+
 # Candidate line: "a op b = c (left: x y z)". Accepts ints, fractions, decimals,
 # and optional negatives. Multi-line findall.
 CAND_RE = re.compile(
@@ -108,7 +121,9 @@ def parse_candidates(text: str) -> list[dict]:
     """Extract (line, remaining_str) pairs from a generator output.
 
     Accepts both ToT format and SFT-leak format. Deduplicates by line text.
+    Chat-model verbosity (backticks, 'leaving', markdown) is normalized first.
     """
+    text = _normalize_cand_text(text)
     out: list[dict] = []
     seen: set = set()
     for m in CAND_RE.finditer(text):
@@ -178,14 +193,25 @@ def trajectory_to_generation(problem: str, y: str) -> str:
 
 # --- Chat-template wrapper for chat-tuned models (Qwen, Llama-3-Instruct) ---
 
+_SYSTEM_TERSE = (
+    "You are terse and precise. Follow the exact output format shown in the "
+    "examples. Do NOT add backticks, markdown, prose, commentary, or bullet "
+    "dashes. Output only the requested lines in the exact format."
+)
+
+
 def maybe_chat_wrap(tokenizer, raw_prompt: str, use_chat: bool) -> str:
     """If use_chat, wrap the raw ToT prompt as a user turn so a chat-tuned
     model will respond in assistant format. The raw prompt's few-shot
     exemplars stay intact — we just rebadge them as one user turn and let
-    the assistant continue."""
+    the assistant continue. A terse system message discourages markdown/
+    backtick decorations that would trip the parser."""
     if not use_chat:
         return raw_prompt
-    msgs = [{"role": "user", "content": raw_prompt}]
+    msgs = [
+        {"role": "system", "content": _SYSTEM_TERSE},
+        {"role": "user", "content": raw_prompt},
+    ]
     return tokenizer.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True)
 

@@ -35,7 +35,7 @@ import json
 import random
 import time
 from dataclasses import asdict
-from fractions import Fraction
+# Countdown uses integer arithmetic, no Fraction needed.
 from pathlib import Path
 
 import os
@@ -48,21 +48,25 @@ from peft import LoraConfig, get_peft_model
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from src.dagger_rollout import rollout_one
-from src.dataset_24 import make_prompt
+from src.dagger_rollout_cd import rollout_one
 from src.head import HyperbolicHead, UpProjector
-from src.prompt_builders import get_builder_24, sft_prompt_24
-from src.tree_data import fraction_to_str, render_state_from_history
+from src.oracle_cd import apply_step as cd_apply_step
+from src.prompt_builders import get_builder_cd, sft_prompt_cd
+from src.tree_data_cd import render_state_from_history
 
 
-def load_problems(jsonl_path: str) -> list[str]:
-    seen, out = set(), []
+def load_problems(jsonl_path: str) -> list[dict]:
+    """Countdown problems are dicts {pool: list[int], target: int}."""
+    out = []
+    seen: set = set()
     with open(jsonl_path) as f:
         for line in f:
-            p = json.loads(line)["problem"]
-            if p not in seen:
-                seen.add(p)
-                out.append(p)
+            item = json.loads(line)
+            key = (tuple(sorted(item["pool"])), item["target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"pool": list(item["pool"]), "target": int(item["target"])})
     return out
 
 
@@ -114,13 +118,14 @@ def load_base_and_head(base_path: str, head_path: str, up_proj_hidden: int,
     return tokenizer, model, head, up_proj
 
 
-def _compute_z_with_grad(model, tokenizer, head, up_proj, problem: str,
-                          history: tuple, device: torch.device) -> torch.Tensor:
+def _compute_z_with_grad(model, tokenizer, head, up_proj,
+                          pool, target, history: tuple,
+                          device: torch.device) -> torch.Tensor:
     """z_inj = up_proj(head(frozen_base(canonical_state_text))).
 
     Base forward under adapter-disabled no_grad. Head under no_grad (frozen).
     UpProjector with grad (trainable)."""
-    state_text = render_state_from_history(problem, history)
+    state_text = render_state_from_history(list(pool), target, history)
     ids = tokenizer.encode(state_text, add_special_tokens=True, return_tensors="pt").to(device)
     with torch.no_grad():
         with model.disable_adapter():
@@ -137,19 +142,15 @@ def _pick_winner(winning_ops):
     return min(winning_ops, key=lambda w: (w[0], float(w[1]), float(w[2])))
 
 
-def _format_winner_target(a: Fraction, op_sym: str, b: Fraction, r: Fraction,
-                           pool_after: list, max_steps: int,
+def _format_winner_target(a: int, op_sym: str, b: int, r: int,
+                           pool_after: list, target: int, max_steps: int,
                            step_num: int) -> str:
-    """Target text that follows the `Step N:` (and optional z) context.
-
-    Includes the leading space, the op, the result, and either the
-    'Remaining: ...' tail (if more steps follow) or 'Answer: 24' (if this is
-    the final step producing the target).
-    """
-    head = f" {fraction_to_str(a)} {op_sym} {fraction_to_str(b)} = {fraction_to_str(r)}"
-    if len(pool_after) == 1 and pool_after[0] == Fraction(24):
-        return head + ". Answer: 24"
-    rem = " ".join(fraction_to_str(x) for x in sorted(pool_after))
+    """Target text that follows the `Step N:` (and optional z) context for
+    Countdown. Integer ops, variable target, 5-step trajectories."""
+    head = f" {a} {op_sym} {b} = {r}"
+    if len(pool_after) == 1 and pool_after[0] == target:
+        return head + f". Answer: {target}"
+    rem = " ".join(str(x) for x in sorted(pool_after))
     tail = f". Remaining: {rem}"
     next_step = step_num + 1
     if next_step <= max_steps:
@@ -157,16 +158,14 @@ def _format_winner_target(a: Fraction, op_sym: str, b: Fraction, r: Fraction,
     return head + tail
 
 
-def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
+def dagger_loss(model, tokenizer, head, up_proj,
+                 pool: list[int], target: int, history: tuple,
                  winning_ops, use_z: bool, device: torch.device,
-                 max_steps: int = 3, prompt_builder=None) -> torch.Tensor:
+                 max_steps: int = 5, prompt_builder=None) -> torch.Tensor:
     """Single-winner CE on the full step text of the deterministically-picked
-    winner.
+    Countdown winner.
 
-    `prompt_builder(tokenizer, problem) -> (text, add_special_tokens)`
-    produces the context prompt that primes the model before the trajectory
-    begins. Defaults to `sft_prompt_24` for Llama-SFT backward compatibility;
-    for Qwen + few-shot pass `fewshot_chat_prompt_24`.
+    `prompt_builder(tokenizer, pool, target)` — see src.prompt_builders.
     """
     winner = _pick_winner(winning_ops)
     if winner is None:
@@ -174,7 +173,7 @@ def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
     wop, wa, wb, wr = winner
 
     if prompt_builder is None:
-        prompt_builder = sft_prompt_24
+        prompt_builder = sft_prompt_cd
 
     embed_table = model.get_input_embeddings()
     dtype = next(model.parameters()).dtype
@@ -184,23 +183,22 @@ def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
         return embed_table(ids), ids.size(1)
 
     pieces = []
-    prompt_text, prompt_add_special = prompt_builder(tokenizer, problem)
+    prompt_text, prompt_add_special = prompt_builder(tokenizer, pool, target)
     ctx_prompt_embed, _ = _embed_text(prompt_text, add_special=prompt_add_special)
     pieces.append(ctx_prompt_embed)
 
-    pool = [Fraction(int(x)) for x in problem.split(",")]
+    working_pool = [int(x) for x in pool]
 
     for i, (a, op_sym, b, r) in enumerate(history):
         if use_z:
-            z = _compute_z_with_grad(model, tokenizer, head, up_proj, problem,
-                                      history[:i], device)
+            z = _compute_z_with_grad(model, tokenizer, head, up_proj,
+                                      pool, target, history[:i], device)
             pieces.append(z.unsqueeze(1).to(dtype))
-        pool.remove(a); pool.remove(b); pool.append(r)
-        remaining_sorted = sorted(pool)
+        working_pool.remove(int(a)); working_pool.remove(int(b)); working_pool.append(int(r))
+        remaining_sorted = sorted(working_pool)
         content = (
-            f" {fraction_to_str(a)} {op_sym} {fraction_to_str(b)} = "
-            f"{fraction_to_str(r)}. Remaining: "
-            + " ".join(fraction_to_str(x) for x in remaining_sorted)
+            f" {int(a)} {op_sym} {int(b)} = {int(r)}. Remaining: "
+            + " ".join(str(x) for x in remaining_sorted)
         )
         next_step_num = i + 2
         if next_step_num <= max_steps:
@@ -209,19 +207,20 @@ def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
         pieces.append(emb)
 
     if use_z:
-        z = _compute_z_with_grad(model, tokenizer, head, up_proj, problem,
-                                  history, device)
+        z = _compute_z_with_grad(model, tokenizer, head, up_proj,
+                                  pool, target, history, device)
         pieces.append(z.unsqueeze(1).to(dtype))
 
     context = torch.cat(pieces, dim=1)
     context_len = context.size(1)
 
-    # Construct target text for the picked winner
-    pool_after_winner = list(pool)
-    pool_after_winner.remove(wa); pool_after_winner.remove(wb)
-    pool_after_winner.append(wr)
+    # Construct target text for the picked winner (ints)
+    pool_after_winner = list(working_pool)
+    pool_after_winner.remove(int(wa)); pool_after_winner.remove(int(wb))
+    pool_after_winner.append(int(wr))
     step_num = len(history) + 1
-    target_text = _format_winner_target(wa, wop, wb, wr, pool_after_winner,
+    target_text = _format_winner_target(int(wa), wop, int(wb), int(wr),
+                                         pool_after_winner, target,
                                          max_steps, step_num)
     target_ids = tokenizer.encode(target_text, add_special_tokens=False,
                                     return_tensors="pt").to(device)
@@ -253,8 +252,11 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
              "n_boundaries_empty_oracle": 0}
 
     for pi, problem in enumerate(problems):
+        pool = problem["pool"]
+        target = problem["target"]
         for ri in range(rollouts_per_problem):
-            r = rollout_one(model, tokenizer, head, up_proj, problem, device,
+            r = rollout_one(model, tokenizer, head, up_proj,
+                            pool, target, device,
                             use_z=use_z, temperature=temperature, top_p=top_p,
                             max_new_tokens=max_new_tokens, max_steps=max_steps,
                             prompt_builder=prompt_builder)
@@ -271,7 +273,8 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
                     # only the subsequent boundaries are dropped.
                     if bdy.winning_ops:
                         pairs.append({
-                            "problem": bdy.problem,
+                            "pool": list(bdy.pool),
+                            "target": bdy.target,
                             "history_before": bdy.history_before,
                             "winning_ops": bdy.winning_ops,
                         })
@@ -280,7 +283,8 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
                     stats["n_boundaries_empty_oracle"] += 1
                     break
                 pairs.append({
-                    "problem": bdy.problem,
+                    "pool": list(bdy.pool),
+                    "target": bdy.target,
                     "history_before": bdy.history_before,
                     "winning_ops": bdy.winning_ops,
                 })
@@ -399,7 +403,7 @@ def main():
     # prompt or a chat-template few-shot prompt (needed for Qwen-14B base
     # without SFT). Defaults to SFT for backward compatibility.
     prompt_style = str(config["training"].get("prompt_style", "sft"))
-    prompt_builder = get_builder_24(prompt_style)
+    prompt_builder = get_builder_cd(prompt_style)
     if rank == 0:
         print(f"prompt_style={prompt_style}", flush=True)
     if distributed:
@@ -499,10 +503,13 @@ def main():
         for pi, pair in enumerate(local_train_pairs):
             optimizer.zero_grad()
             loss = dagger_loss(model, tokenizer, head, up_proj,
-                               problem=pair["problem"],
+                               pool=pair["pool"],
+                               target=pair["target"],
                                history=pair["history_before"],
                                winning_ops=pair["winning_ops"],
                                use_z=args.use_z, device=device,
+                               max_steps=int(config["training"].get("max_steps",
+                                             len(pair["pool"]) - 1)),
                                prompt_builder=prompt_builder)
             if loss is None:
                 # Still all_reduce nothing — need to keep ranks in lockstep.
