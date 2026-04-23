@@ -24,8 +24,8 @@ MASTER_PORT="${MASTER_PORT:-29540}"
 BASE_CONFIG="${BASE_CONFIG:-configs/stage2_dagger.yaml}"
 RUN_CONFIG="${RUN_CONFIG:-configs/stage2_dagger_${HEAD_TAG}.yaml}"
 
-if [ "$ARM" != "noz" ] && [ "$ARM" != "z" ]; then
-  echo "ARM must be 'noz' or 'z', got '$ARM'" >&2
+if [ "$ARM" != "noz" ] && [ "$ARM" != "z" ] && [ "$ARM" != "randz" ]; then
+  echo "ARM must be 'noz' | 'z' | 'randz', got '$ARM'" >&2
   exit 1
 fi
 
@@ -52,7 +52,13 @@ pathlib.Path("$RUN_CONFIG").write_text(yaml.dump(cfg))
 PY
 
 USE_Z_FLAG=""
-if [ "$ARM" = "z" ]; then USE_Z_FLAG="--use_z"; fi
+RANDOMZ_FLAG=""
+case "$ARM" in
+  z)     USE_Z_FLAG="--use_z" ;;
+  noz)   ;;
+  randz) USE_Z_FLAG="--use_z"; RANDOMZ_FLAG="--random_z" ;;
+  *) echo "ARM must be z|noz|randz, got '$ARM'" >&2; exit 1 ;;
+esac
 SEED_FLAG=""
 ARM_SUFFIX="$ARM"
 if [ -n "$SEED" ]; then
@@ -61,7 +67,7 @@ if [ -n "$SEED" ]; then
 fi
 
 python -m torch.distributed.run --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
-  -m src.train_stage2_dagger --config "$RUN_CONFIG" $USE_Z_FLAG $SEED_FLAG --arm_tag "$ARM_SUFFIX"
+  -m src.train_stage2_dagger --config "$RUN_CONFIG" $USE_Z_FLAG $RANDOMZ_FLAG $SEED_FLAG --arm_tag "$ARM_SUFFIX"
 
 # Generate + evaluate (single GPU — the first visible one)
 CKPT_ROOT=$(python -c "import yaml; print(yaml.safe_load(open('$RUN_CONFIG'))['training']['output_dir'])")

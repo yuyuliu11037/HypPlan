@@ -115,11 +115,23 @@ def load_base_and_head(base_path: str, head_path: str, up_proj_hidden: int,
 
 
 def _compute_z_with_grad(model, tokenizer, head, up_proj, problem: str,
-                          history: tuple, device: torch.device) -> torch.Tensor:
+                          history: tuple, device: torch.device,
+                          random_z: bool = False) -> torch.Tensor:
     """z_inj = up_proj(head(frozen_base(canonical_state_text))).
 
     Base forward under adapter-disabled no_grad. Head under no_grad (frozen).
-    UpProjector with grad (trainable)."""
+    UpProjector with grad (trainable).
+
+    When `random_z=True`, bypass head/up_proj entirely and return a random
+    Gaussian vector rescaled to the same L2 norm the LayerNorm-ended
+    UpProjector produces (≈ √hidden_dim). Ablates geometric content while
+    keeping injection magnitude. In this mode up_proj receives no grad.
+    """
+    hidden_dim = up_proj.net[-1].normalized_shape[0]
+    if random_z:
+        g = torch.randn(1, hidden_dim, device=device)
+        g = g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        return g * (hidden_dim ** 0.5)
     state_text = render_state_from_history(problem, history)
     ids = tokenizer.encode(state_text, add_special_tokens=True, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -159,14 +171,15 @@ def _format_winner_target(a: Fraction, op_sym: str, b: Fraction, r: Fraction,
 
 def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
                  winning_ops, use_z: bool, device: torch.device,
-                 max_steps: int = 3, prompt_builder=None) -> torch.Tensor:
+                 max_steps: int = 3, prompt_builder=None,
+                 random_z: bool = False) -> torch.Tensor:
     """Single-winner CE on the full step text of the deterministically-picked
     winner.
 
     `prompt_builder(tokenizer, problem) -> (text, add_special_tokens)`
     produces the context prompt that primes the model before the trajectory
-    begins. Defaults to `sft_prompt_24` for Llama-SFT backward compatibility;
-    for Qwen + few-shot pass `fewshot_chat_prompt_24`.
+    begins. Defaults to `sft_prompt_24`; for Qwen + few-shot pass
+    `fewshot_chat_prompt_24`.
     """
     winner = _pick_winner(winning_ops)
     if winner is None:
@@ -193,7 +206,7 @@ def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
     for i, (a, op_sym, b, r) in enumerate(history):
         if use_z:
             z = _compute_z_with_grad(model, tokenizer, head, up_proj, problem,
-                                      history[:i], device)
+                                      history[:i], device, random_z=random_z)
             pieces.append(z.unsqueeze(1).to(dtype))
         pool.remove(a); pool.remove(b); pool.append(r)
         remaining_sorted = sorted(pool)
@@ -210,7 +223,7 @@ def dagger_loss(model, tokenizer, head, up_proj, problem: str, history: tuple,
 
     if use_z:
         z = _compute_z_with_grad(model, tokenizer, head, up_proj, problem,
-                                  history, device)
+                                  history, device, random_z=random_z)
         pieces.append(z.unsqueeze(1).to(dtype))
 
     context = torch.cat(pieces, dim=1)
@@ -242,7 +255,7 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
                              use_z: bool, device, temperature: float, top_p: float,
                              rollouts_per_problem: int, max_new_tokens: int,
                              max_steps: int, log_every: int = 100,
-                             prompt_builder=None):
+                             prompt_builder=None, random_z: bool = False):
     """Rollout phase. Returns list of (problem, history_before, winning_ops)
     training tuples and rollout-level stats."""
     model.eval()
@@ -257,7 +270,7 @@ def collect_training_pairs(model, tokenizer, head, up_proj, problems,
             r = rollout_one(model, tokenizer, head, up_proj, problem, device,
                             use_z=use_z, temperature=temperature, top_p=top_p,
                             max_new_tokens=max_new_tokens, max_steps=max_steps,
-                            prompt_builder=prompt_builder)
+                            prompt_builder=prompt_builder, random_z=random_z)
             stats["n_rollouts"] += 1
             stats["n_solved"] += int(r.solved)
             stats["stopped_reason"][r.stopped_reason] = (
@@ -352,6 +365,12 @@ def main():
     parser.add_argument("--config", default="configs/stage2_dagger.yaml")
     parser.add_argument("--use_z", action="store_true",
                         help="Inject z at step boundaries. Omit for the no-z control arm.")
+    parser.add_argument("--random_z", action="store_true",
+                        help="Null baseline: replace head-produced z with a "
+                             "norm-matched random Gaussian at every boundary, "
+                             "during both rollout and CE training. Ablates the "
+                             "geometric content of z while keeping the "
+                             "injection magnitude. Requires --use_z.")
     parser.add_argument("--arm_tag", default=None,
                         help="Optional override for output subdir suffix.")
     parser.add_argument("--seed", type=int, default=None,
@@ -367,11 +386,18 @@ def main():
 
     # Seed override — also propagates into a seed-tagged arm_tag so multi-seed
     # runs don't clobber each other.
+    if args.random_z and not args.use_z:
+        raise SystemExit("--random_z requires --use_z (random vector replaces "
+                          "the head-produced z, but injection must be on).")
+
     if args.seed is not None:
         config.setdefault("training", {})["seed"] = int(args.seed)
-        default_arm = ("z" if args.use_z else "noz") + f"_s{int(args.seed)}"
+        base_arm = ("randz" if args.random_z else
+                     ("z" if args.use_z else "noz"))
+        default_arm = f"{base_arm}_s{int(args.seed)}"
     else:
-        default_arm = ("z" if args.use_z else "noz")
+        default_arm = ("randz" if args.random_z else
+                        ("z" if args.use_z else "noz"))
     arm_tag = args.arm_tag or default_arm
     out_root = Path(config["training"]["output_dir"]) / arm_tag
     results_root = Path(config["eval"]["output_dir"]) / arm_tag
@@ -379,7 +405,9 @@ def main():
         out_root.mkdir(parents=True, exist_ok=True)
         results_root.mkdir(parents=True, exist_ok=True)
         with open(out_root / "config.yaml", "w") as f:
-            yaml.dump({**config, "use_z": args.use_z, "arm_tag": arm_tag,
+            yaml.dump({**config, "use_z": args.use_z,
+                       "random_z": args.random_z,
+                       "arm_tag": arm_tag,
                        "world_size": world_size}, f)
 
     # Deterministic seed before LoRA + up_proj init so every rank starts identical.
@@ -449,7 +477,7 @@ def main():
             max_new_tokens=int(config["training"]["rollout_max_new_tokens"]),
             max_steps=int(config["training"]["max_steps"]),
             log_every=max(50 // max(world_size, 1), 25),
-            prompt_builder=prompt_builder,
+            prompt_builder=prompt_builder, random_z=args.random_z,
         )
 
         # Gather pairs from all ranks → every rank has the full pair list so
@@ -503,7 +531,8 @@ def main():
                                history=pair["history_before"],
                                winning_ops=pair["winning_ops"],
                                use_z=args.use_z, device=device,
-                               prompt_builder=prompt_builder)
+                               prompt_builder=prompt_builder,
+                               random_z=args.random_z)
             if loss is None:
                 # Still all_reduce nothing — need to keep ranks in lockstep.
                 if distributed:

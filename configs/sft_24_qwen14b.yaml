@@ -1,0 +1,26 @@
+model:
+  base_model: "Qwen/Qwen2.5-14B-Instruct"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+data:
+  train_data: "data/24_train.jsonl"
+  test_data: "data/24_test_tot.jsonl"
+  max_seq_len: 800
+
+training:
+  lr: 1.0e-4
+  epochs: 3
+  batch_size: 1
+  grad_accum: 4
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  grad_clip: 1.0
+  output_dir: "checkpoints/sft_24_qwen14b"
+  log_dir: "logs/sft_24_qwen14b"
+
+eval:
+  max_new_tokens: 256
+  temperature: 0.0
+  output_dir: "results/sft_24_qwen14b"

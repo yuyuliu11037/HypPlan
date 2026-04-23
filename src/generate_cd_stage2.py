@@ -265,7 +265,7 @@ def main():
             )
             out = {"pool": record["pool"], "target": record["target"],
                    "problem_idx": record.get("problem_idx"),
-                   "ground_truth": record["text"],
+                   "ground_truth": record.get("text"),
                    "generation": gen}
             fout.write(json.dumps(out) + "\n"); fout.flush()
             if (i + 1) % 20 == 0:

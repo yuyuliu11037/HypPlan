@@ -1,0 +1,28 @@
+data:
+  test_data: data/24_varied_test.jsonl
+  train_data: data/24_varied_train.jsonl
+  train_limit: 5000           # scaled down from full 16440 after 3 NCCL timeouts
+eval:
+  max_new_tokens: 256
+  max_z_injections: 3
+  output_dir: results/dagger_stage2_24_varied_qwen14b
+  temperature: 0.0
+model:
+  base_model: Qwen/Qwen2.5-14B-Instruct
+  head_checkpoint: checkpoints/head_24_varied_qwen14b_rank/head.pt
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_r: 16
+  up_proj_hidden: 2048
+training:
+  epochs: 2                # scaled from 3 after NCCL timeout crashes
+  grad_clip: 0.3
+  lr: 5.0e-5
+  max_steps: 3
+  output_dir: checkpoints/dagger_stage2_24_varied_qwen14b
+  rollout_max_new_tokens: 256
+  rollout_temperature: 0.7
+  rollout_top_p: 0.95
+  rollouts_per_problem: 1
+  seed: 1234
+  weight_decay: 0.0

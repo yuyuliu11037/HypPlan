@@ -23,6 +23,20 @@ INSTRUCTION_24 = (
 )
 
 
+def _apply_chat_template_no_think(tokenizer, msgs):
+    """Wrapper around `apply_chat_template` that passes `enable_thinking=False`
+    when the tokenizer supports it (Qwen3 family). Silently falls back for
+    older tokenizers (Qwen2.5 and earlier) that don't accept the kwarg.
+    """
+    try:
+        return tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False)
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True)
+
+
 def sft_prompt_24(tokenizer, problem: str) -> Tuple[str, bool]:
     """Raw completion prompt matching our SFT training distribution."""
     nums = problem.replace(",", " ")
@@ -73,8 +87,7 @@ def fewshot_chat_prompt_24(tokenizer, problem: str) -> Tuple[str, bool]:
         msgs.append({"role": "user", "content": uq})
         msgs.append({"role": "assistant", "content": aa})
     msgs.append({"role": "user", "content": f"Problem: {nums}"})
-    chat = tokenizer.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True)
+    chat = _apply_chat_template_no_think(tokenizer, msgs)
     # Prime the assistant turn with "Step 1:" so the continuation matches
     # our parser's expectation.
     chat = chat + "Step 1:"
@@ -159,8 +172,7 @@ def fewshot_chat_prompt_cd(tokenizer, pool: list[int], target: int) -> Tuple[str
         msgs.append({"role": "assistant", "content": aa})
     msgs.append({"role": "user",
                  "content": f"Problem: {pool_str} | Target: {target}"})
-    chat = tokenizer.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True)
+    chat = _apply_chat_template_no_think(tokenizer, msgs)
     chat = chat + "Step 1:"
     return chat, False
 
@@ -177,3 +189,84 @@ def get_builder_cd(name: str):
             f"Unknown prompt_style '{name}'. Valid: "
             f"{list(PROMPT_BUILDERS_CD.keys())}")
     return PROMPT_BUILDERS_CD[name]
+
+
+# ============================================================================
+# Generic (task-agnostic, varied-target) prompt builders.
+# Pool size and target both vary; examples cover 1/2/3-step trajectories so the
+# model can learn to pick its own depth. Format matches our `Step N:` parser.
+# ============================================================================
+
+INSTRUCTION_GENERIC = (
+    "Combine the given numbers using +, -, *, / to reach the target. "
+    "Use each number exactly once."
+)
+
+FEWSHOT_SYSTEM_GENERIC = (
+    "You are a careful arithmetic solver. Combine the given numbers using "
+    "+, -, *, / to reach the target. Each number must be used exactly once. "
+    "Write each operation on its own line as 'Step N: a op b = r. "
+    "Remaining: ...', and finish with 'Answer: <target>'. If the pool already "
+    "equals the target, write only 'Answer: <target>'."
+)
+
+FEWSHOT_EXAMPLES_GENERIC = [
+    (
+        "Numbers: 4 4 6 8 | Target: 24",
+        "Step 1: 4 + 8 = 12. Remaining: 4 6 12\n"
+        "Step 2: 6 - 4 = 2. Remaining: 2 12\n"
+        "Step 3: 2 * 12 = 24. Answer: 24",
+    ),
+    (
+        "Numbers: 3 5 6 | Target: 33",
+        "Step 1: 5 * 6 = 30. Remaining: 3 30\n"
+        "Step 2: 3 + 30 = 33. Answer: 33",
+    ),
+    (
+        "Numbers: 7 9 | Target: 63",
+        "Step 1: 7 * 9 = 63. Answer: 63",
+    ),
+]
+
+
+def _format_pool_target(pool, target) -> str:
+    nums = " ".join(str(int(n)) for n in sorted(pool))
+    return f"Numbers: {nums} | Target: {int(target)}"
+
+
+def sft_prompt_generic(tokenizer, pool, target) -> Tuple[str, bool]:
+    """Raw completion prompt for the varied-target generic task.
+
+    Does not prime 'Step 1:' — a 1-element pool matching the target means
+    the correct continuation is 'Answer: <target>', not a wasted Step 1.
+    """
+    head = _format_pool_target(pool, target)
+    text = f"{INSTRUCTION_GENERIC}\n\n{head}\n"
+    return text, True
+
+
+def fewshot_chat_prompt_generic(tokenizer, pool, target) -> Tuple[str, bool]:
+    """Chat-template prompt with varied-length exemplars. No 'Step 1:' prime
+    so trivial pools (length-1) can emit 'Answer:' directly."""
+    head = _format_pool_target(pool, target)
+    msgs = [{"role": "system", "content": FEWSHOT_SYSTEM_GENERIC}]
+    for uq, aa in FEWSHOT_EXAMPLES_GENERIC:
+        msgs.append({"role": "user", "content": uq})
+        msgs.append({"role": "assistant", "content": aa})
+    msgs.append({"role": "user", "content": head})
+    chat = _apply_chat_template_no_think(tokenizer, msgs)
+    return chat, False
+
+
+PROMPT_BUILDERS_GENERIC: dict[str, Callable[[object, list, int], Tuple[str, bool]]] = {
+    "sft": sft_prompt_generic,
+    "fewshot": fewshot_chat_prompt_generic,
+}
+
+
+def get_builder_generic(name: str):
+    if name not in PROMPT_BUILDERS_GENERIC:
+        raise ValueError(
+            f"Unknown prompt_style '{name}'. Valid: "
+            f"{list(PROMPT_BUILDERS_GENERIC.keys())}")
+    return PROMPT_BUILDERS_GENERIC[name]

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.evaluate_24 import parse_and_validate
@@ -62,8 +62,13 @@ def build_chat(tokenizer, problem: str) -> str:
         msgs.append({"role": "user", "content": user_q})
         msgs.append({"role": "assistant", "content": assistant_a})
     msgs.append({"role": "user", "content": f"Problem: {problem}"})
-    return tokenizer.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True)
+    try:
+        return tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False)
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True)
 
 
 def main() -> None:
@@ -77,19 +82,32 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--shard_rank", type=int, default=0)
     ap.add_argument("--shard_world", type=int, default=1)
+    ap.add_argument("--load_in_4bit", action="store_true",
+                    help="Load the base model in 4-bit NF4 (for 32B on 48GB GPUs).")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Loading {args.model}", flush=True)
+    print(f"Loading {args.model} (4bit={args.load_in_4bit})", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, device_map="auto",
-    ).eval()
+    if args.load_in_4bit:
+        bnb = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, quantization_config=bnb, device_map="auto",
+        ).eval()
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, torch_dtype=torch.bfloat16, device_map="auto",
+        ).eval()
 
     seen: set = set()
     problems: list[str] = []

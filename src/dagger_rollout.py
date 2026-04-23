@@ -56,10 +56,22 @@ class Rollout:
 
 @torch.no_grad()
 def _compute_z(model, tokenizer, head, up_proj, problem: str, history: tuple,
-               device, use_z: bool) -> Optional[torch.Tensor]:
-    """(1, hidden) virtual-token vector, or None when use_z=False."""
+               device, use_z: bool, random_z: bool = False) -> Optional[torch.Tensor]:
+    """(1, hidden) virtual-token vector, or None when use_z=False.
+
+    When `random_z=True`, return a Gaussian vector rescaled so its L2 norm
+    matches what `UpProjector` produces at its LayerNorm output
+    (≈ √hidden_dim). This ablates the geometric content of z while
+    preserving its injection magnitude.
+    """
     if not use_z:
         return None
+    hidden_dim = up_proj.net[-1].normalized_shape[0]  # LayerNorm's out_dim
+    if random_z:
+        g = torch.randn(1, hidden_dim, device=device)
+        g = g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        g = g * (hidden_dim ** 0.5)
+        return g
     state_text = render_state_from_history(problem, history)
     ids = tokenizer.encode(state_text, add_special_tokens=True, return_tensors="pt").to(device)
     with model.disable_adapter():
@@ -115,16 +127,16 @@ def _parse_history_from_text(step1_text: str) -> tuple:
 def rollout_one(model, tokenizer, head, up_proj, problem: str, device,
                 use_z: bool = True, temperature: float = 0.7, top_p: float = 0.95,
                 max_new_tokens: int = 256, max_steps: int = 3,
-                prompt_builder=None) -> Rollout:
+                prompt_builder=None, random_z: bool = False) -> Rollout:
     """Generate one trajectory with per-step oracle labels.
 
     `model` must be a PEFT-wrapped causal LM so `model.disable_adapter()`
     works (required to pull frozen-base features for z computation).
 
     `prompt_builder(tokenizer, problem) -> (text, add_special_tokens)` lets
-    callers swap the SFT-style raw prompt for a chat-template few-shot prompt
+    callers swap the raw-text prompt for a chat-template few-shot prompt
     (used with Qwen-14B base, see `src.prompt_builders`). Defaults to
-    `sft_prompt_24` for backward compatibility with Llama-SFT pipelines.
+    `sft_prompt_24`.
     """
     result = Rollout(problem=problem)
 
@@ -162,7 +174,8 @@ def rollout_one(model, tokenizer, head, up_proj, problem: str, device,
 
     # Inject z before the first step's content tokens.
     pending_z = _compute_z(model, tokenizer, head, up_proj, problem,
-                            history=tuple(), device=device, use_z=use_z)
+                            history=tuple(), device=device, use_z=use_z,
+                            random_z=random_z)
     prev_boundary_count = 0   # number of "\nStep N:" substrings seen in the
                               # generated-since-prompt text
 
@@ -234,7 +247,8 @@ def rollout_one(model, tokenizer, head, up_proj, problem: str, device,
                 result.stopped_reason = "empty_oracle"
                 break
             pending_z = _compute_z(model, tokenizer, head, up_proj, problem,
-                                     history=history, device=device, use_z=use_z)
+                                     history=history, device=device, use_z=use_z,
+                                     random_z=random_z)
 
     # If we exited without setting a reason (e.g. max_new_tokens cutoff mid-step),
     # mark as budget-exhausted. The last boundary's transition_valid is None.

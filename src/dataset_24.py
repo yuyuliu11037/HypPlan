@@ -78,6 +78,62 @@ class Game24SFTDataset(Dataset):
         }
 
 
+class Game24SFTChatDataset(Dataset):
+    """SFT dataset for Game-24 with chat-template + few-shot prompt.
+
+    Mirrors `Game24SFTDataset` but uses `prompt_builders.fewshot_chat_prompt_24`
+    so the SFT baseline trains under the exact same prompt distribution that
+    our DAgger stage-2 trains/evals under. The assistant's completion is the
+    canonical trajectory starting after "Step 1:" (appended as generation
+    prime by the builder).
+    """
+
+    def __init__(self, tokenizer, data_path: str, max_seq_len: int = 800,
+                  unique_problems: bool = True):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        from src.prompt_builders import fewshot_chat_prompt_24
+        self._prompt_builder = fewshot_chat_prompt_24
+        seen = set()
+        self.data = []
+        with open(data_path) as f:
+            for line in f:
+                item = json.loads(line)
+                if unique_problems and item["problem"] in seen:
+                    continue
+                seen.add(item["problem"])
+                self.data.append(item)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        prompt_text, prompt_add_special = self._prompt_builder(
+            self.tokenizer, item["problem"])
+        completion = make_completion(item["text"])
+
+        prompt_ids = self.tokenizer.encode(
+            prompt_text, add_special_tokens=prompt_add_special)
+        completion_ids = self.tokenizer.encode(
+            completion, add_special_tokens=False)
+        if self.tokenizer.eos_token_id is not None:
+            completion_ids.append(self.tokenizer.eos_token_id)
+
+        input_ids = prompt_ids + completion_ids
+        if len(input_ids) > self.max_seq_len:
+            input_ids = input_ids[:self.max_seq_len]
+
+        labels = [-100] * len(prompt_ids) + completion_ids
+        labels = labels[:len(input_ids)]
+
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.ones(len(input_ids), dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+
+
 def collate_fn(batch: list[dict]) -> dict:
     """Pad batch to max length with right-padding."""
     max_len = max(b["input_ids"].size(0) for b in batch)

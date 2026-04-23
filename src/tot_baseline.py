@@ -7,11 +7,6 @@ score it (sum of weighted sure/likely/impossible labels), then keep the top-5
 by score. After 3 steps, a trajectory is "correct" if it ends in "(left: 24)"
 and its ops validate as a legal 3-step Game-of-24 solution.
 
-Setup used here:
-- Generator = our SFT'd Llama-3.1-8B (checkpoints/sft_24_tot_merged).
-- Evaluator = base Llama-3.1-8B-Instruct (SFT can't emit sure/likely/impossible).
-This matches the design choice documented in README's "ToT baseline" roadmap.
-
 Supports both any-of-top-K (matches the paper's 74% metric) and top-1 greedy-
 equivalent reporting. Multi-seed support via --seed.
 """
@@ -26,7 +21,7 @@ import time
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.evaluate_24 import parse_and_validate
@@ -184,14 +179,20 @@ def trajectory_to_generation(problem: str, y: str) -> str:
     for idx, m in enumerate(CAND_RE.finditer(y), start=1):
         a, op, b, r, left = m.groups()
         left = left.strip()
-        if idx == 3 and left.replace(".", "").replace("-", "").isdigit() and int(float(left)) == 24:
+        is_final_24 = False
+        if idx == 3 and left.replace(".", "").replace("-", "").isdigit():
+            try:
+                is_final_24 = int(float(left)) == 24
+            except (ValueError, OverflowError):
+                is_final_24 = False
+        if is_final_24:
             out_lines.append(f"Step {idx}: {a} {op} {b} = {r}. Answer: 24")
         else:
             out_lines.append(f"Step {idx}: {a} {op} {b} = {r}. Remaining: {left}")
     return "\n".join(out_lines)
 
 
-# --- Chat-template wrapper for chat-tuned models (Qwen, Llama-3-Instruct) ---
+# --- Chat-template wrapper for chat-tuned models (e.g. Qwen-Instruct) ---
 
 _SYSTEM_TERSE = (
     "You are terse and precise. Follow the exact output format shown in the "
@@ -212,21 +213,61 @@ def maybe_chat_wrap(tokenizer, raw_prompt: str, use_chat: bool) -> str:
         {"role": "system", "content": _SYSTEM_TERSE},
         {"role": "user", "content": raw_prompt},
     ]
-    return tokenizer.apply_chat_template(
-        msgs, tokenize=False, add_generation_prompt=True)
+    # MistralCommonTokenizer (Mistral-Small 3.2+) doesn't accept
+    # add_generation_prompt / enable_thinking kwargs; it already primes the
+    # assistant turn in its raw template.
+    try:
+        out = tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False)
+    except (TypeError, ValueError):
+        try:
+            out = tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True)
+        except (TypeError, ValueError):
+            out = tokenizer.apply_chat_template(msgs, tokenize=False)
+    # Optional post-template suffix (e.g. "<|channel|>final<|message|>" to
+    # force GPT-OSS into its final channel and skip the analysis thinking
+    # block). Controlled via env var so no signature change is needed.
+    suffix = os.environ.get("TOT_PROMPT_SUFFIX", "")
+    if suffix:
+        out = out + suffix
+    return out
 
 
 # --- Model plumbing ---
 
-def load_model(name_or_path: str, device: torch.device):
-    print(f"  loading {name_or_path}", flush=True)
+def load_model(name_or_path: str, device: torch.device,
+               load_in_4bit: bool = False):
+    print(f"  loading {name_or_path} (4bit={load_in_4bit})", flush=True)
     tok = AutoTokenizer.from_pretrained(name_or_path, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    tok.padding_side = "left"
-    model = AutoModelForCausalLM.from_pretrained(
-        name_or_path, torch_dtype=torch.bfloat16, device_map={"": device},
-    ).eval()
+    try:
+        tok.padding_side = "left"
+    except Exception:
+        pass  # MistralCommonTokenizer doesn't expose padding_side
+    if load_in_4bit:
+        bnb = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        kwargs = dict(quantization_config=bnb, device_map={"": device},
+                      trust_remote_code=True)
+    else:
+        kwargs = dict(torch_dtype=torch.bfloat16, device_map={"": device},
+                      trust_remote_code=True)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(name_or_path, **kwargs).eval()
+    except ValueError as e:
+        if "Unrecognized configuration" in str(e) and "Mistral3" in str(e):
+            from transformers.models.mistral3 import Mistral3ForConditionalGeneration
+            model = Mistral3ForConditionalGeneration.from_pretrained(
+                name_or_path, **kwargs).eval()
+        else:
+            raise
     return tok, model
 
 
@@ -326,8 +367,9 @@ def tot_solve(problem: str, gen_tok, gen_model, eval_tok, eval_model,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--generator", default="checkpoints/sft_24_tot_merged")
-    ap.add_argument("--evaluator", default="meta-llama/Llama-3.1-8B-Instruct")
+    ap.add_argument("--generator", required=True)
+    ap.add_argument("--evaluator", default=None,
+                    help="Evaluator model path. Ignored if --shared_model.")
     ap.add_argument("--shared_model", action="store_true",
                     help="Use generator as both propose + value role "
                          "(evaluator arg ignored). Saves GPU memory.")
@@ -344,6 +386,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--limit", type=int, default=-1)
     ap.add_argument("--batch_size", type=int, default=16)
+    ap.add_argument("--load_in_4bit", action="store_true",
+                    help="Load base model(s) in 4-bit NF4 (for 32B on 48GB GPUs).")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -355,12 +399,15 @@ def main() -> None:
     if args.shared_model:
         print(f"Loading shared model (used for both propose + value): "
               f"{args.generator}", flush=True)
-        gen_tok, gen_model = load_model(args.generator, device)
+        gen_tok, gen_model = load_model(args.generator, device,
+                                        load_in_4bit=args.load_in_4bit)
         eval_tok, eval_model = gen_tok, gen_model
     else:
         print("Loading models (generator, evaluator)", flush=True)
-        gen_tok, gen_model = load_model(args.generator, device)
-        eval_tok, eval_model = load_model(args.evaluator, device)
+        gen_tok, gen_model = load_model(args.generator, device,
+                                        load_in_4bit=args.load_in_4bit)
+        eval_tok, eval_model = load_model(args.evaluator, device,
+                                          load_in_4bit=args.load_in_4bit)
 
     # Deduplicate test problems (file has one line per ground-truth trajectory)
     seen: set = set()

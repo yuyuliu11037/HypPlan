@@ -44,8 +44,38 @@ class TreeCacheDataset(Dataset):
         idx = self.indices[i]
         meta = torch.load(self.split_dir / f"problem_{idx}.pt", weights_only=False)
         hidden = np.load(self.split_dir / f"hidden_{idx}.npy")
-        # Countdown caches store v_values (continuous |final - target|) and
-        # pool/target; Game-24 caches don't have these. Pass through if present.
+
+        # Varied-G24 caches may store only a subsampled set of nodes (with
+        # `sampled_idx`). When that's the case, restrict all per-node arrays
+        # to the sampled set so downstream code sees a dense "mini tree" of
+        # length k = len(sampled_idx). Pairwise LCA-distance paths (used by
+        # distortion/ranking losses) are not meaningful on a sampled subset
+        # — use origin_ranking or origin_ranking_rank losses for these caches.
+        sampled = meta.get("sampled_idx")
+        if sampled is not None:
+            n_eff = int(len(sampled))
+            out = {
+                "idx": idx,
+                "problem": meta.get("problem", str(meta.get("pool", ""))),
+                "n": n_eff,
+                "parents": np.full(n_eff, -1, dtype=np.int32),  # topology lost
+                "depths": meta["depths"][sampled],
+                "is_terminal": meta["is_terminal"][sampled],
+                "is_success": meta["is_success"][sampled],
+                "hidden": hidden,  # float16 (k, H)
+                "sampled": True,
+            }
+            if "v_values" in meta:
+                out["v_values"] = meta["v_values"][sampled]
+            elif "dist_to_success" in meta:
+                # Convert dist-to-success (with INF sentinel) to v_values
+                # convention (-1 = unreachable).
+                d = np.asarray(meta["dist_to_success"])[sampled]
+                INF = 10 ** 8
+                out["v_values"] = np.where(d >= INF, -1, d).astype(np.int32)
+            return out
+
+        # Full-tree cache (CD, old G24) — pass through as before.
         out = {
             "idx": idx,
             "problem": meta.get("problem", str(meta.get("pool", ""))),
@@ -55,6 +85,7 @@ class TreeCacheDataset(Dataset):
             "is_terminal": meta["is_terminal"],
             "is_success": meta["is_success"],
             "hidden": hidden,  # float16 (n, H)
+            "sampled": False,
         }
         if "v_values" in meta:
             out["v_values"] = meta["v_values"]
@@ -380,9 +411,14 @@ def main():
                     head_ref, z, item["parents"], n, num_negatives, rng,
                 )
             elif loss_name == "origin_ranking":
-                v_target = distance_to_nearest_solution(
-                    item["parents"], item["is_success"],
-                )
+                # Prefer precomputed v_values (works for sampled caches where
+                # parents is not available). Fall back to BFS on parents.
+                if item.get("v_values") is not None:
+                    v_target = np.asarray(item["v_values"])
+                else:
+                    v_target = distance_to_nearest_solution(
+                        item["parents"], item["is_success"],
+                    )
                 loss = origin_ranking_loss(
                     head_ref, z, v_target, pairs_per_tree, margin, rng,
                 )

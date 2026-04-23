@@ -93,9 +93,10 @@ def compute_z_inj(model, tokenizer, head, up_proj, problem: str, history: tuple,
                    device, random_z: bool = False) -> torch.Tensor:
     """Render canonical state, get hidden from base (LoRA disabled), head + up_proj."""
     if random_z:
-        hidden_dim = head.mlp[0].in_features
+        hidden_dim = up_proj.net[-1].normalized_shape[0]
         g = torch.randn(1, hidden_dim, device=device)
-        return g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        g = g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        return g * (hidden_dim ** 0.5)
 
     state_text = render_state_from_history(problem, history)
     ids = tokenizer.encode(state_text, add_special_tokens=True, return_tensors="pt").to(device)
@@ -234,6 +235,14 @@ def main():
     prompt_builder = get_builder_24(prompt_style)
     print(f"prompt_style={prompt_style}")
 
+    # If the LoRA was trained under random-z, the inference path must also
+    # use random-z — otherwise there's a train-eval distribution shift.
+    train_random_z = bool(s2cfg.get("random_z", False))
+    effective_random_z = bool(args.random_z) or train_random_z
+    if train_random_z and not args.random_z:
+        print("[generate] config.random_z=True → enabling --random_z at eval",
+              flush=True)
+
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     seen = set()
@@ -264,7 +273,7 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 device=device,
-                random_z=args.random_z,
+                random_z=effective_random_z,
                 no_z_inject=args.no_z_inject,
                 max_z_injections=args.max_z_injections,
                 prompt_builder=prompt_builder,
