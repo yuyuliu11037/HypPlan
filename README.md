@@ -34,6 +34,78 @@ The canonical state text for each boundary passes through frozen base + frozen h
 
 ---
 
+## Task-agnostic variant (Stage 2-varied)
+
+The base pipeline above trains the LoRA on one fixed task: four numbers, target 24. That's what we measured (0.57 DAgger noz-stable, 0.55 z-stable). But the LoRA might have memorized "always reach 24" rather than learned a general skill — *use the z signal to steer reasoning*.
+
+To test the weaker, more defensible claim — *given a meaningful z for any task, the LoRA reasons better* — we built a variant where the LoRA never sees a fixed target.
+
+### Varied-target data
+
+For each original Game-24 problem, we enumerate the full tree as before. Then we **sample (pool, target) pairs**:
+
+- The pool is any internal node's `remaining` list (2, 3, or 4 integers).
+- The target is the value of any size-1 terminal reachable from that node.
+- Only integer intermediate states are kept (fractional subtrees are dropped).
+
+This gives us ~20k unique pairs split 16,464 / 1,751 / 1,707 train / val / test ([data/24_varied_{train,val,test}.jsonl](data/)). Depth distribution per split: ~40% depth-3 (4-number pool), ~36% depth-2 (3-number), ~20% depth-1 (2-number), plus 24 trivial depth-0 cases in train ([data/generate_24_varied.py](data/generate_24_varied.py)).
+
+The LoRA now sees targets ranging from 1 to 900+ across diverse pools. It can't memorize "reach 24" — it must read the target from the prompt each time.
+
+### Generic prompt format
+
+Instead of `Problem: 2 3 4 12` (implicit target 24), every example uses:
+
+```
+Numbers: 2 3 4 12 | Target: 24
+Step 1: ...
+```
+
+The instruction is task-free: "Combine the given numbers using +, -, *, / to reach the target." No "24" baked in. Same `Step N: a op b = r` format as before, so the parser and oracle stay unchanged ([src/prompt_builders.py:fewshot_chat_prompt_generic](src/prompt_builders.py)).
+
+### Stage 1 head (varied trees)
+
+Head architecture is unchanged (Poincaré, hyp_dim=32, origin_ranking loss). The state text fed to the frozen base includes the target in the header, so the head learns a target-aware geometric embedding.
+
+Trained on 16k varied trees for 20 epochs (~46 min on 1 GPU). Held-out eval:
+
+| Split | Spearman(`d_origin`, v) | Rank accuracy |
+|---|---|---|
+| val | 0.452 | 80.8% |
+| test | 0.453 | 80.1% |
+
+"Rank accuracy" = given two nodes where one is closer to success, the head puts that one closer to origin. No val/test gap means the head generalizes across varied targets, not just memorizes ([checkpoints/head_24_varied_qwen14b_rank/](checkpoints/)).
+
+### Stage 2 DAgger (varied-target)
+
+Same DAgger loop as the base pipeline, but:
+
+- Training problems are `(pool, target)` pairs, not 4-number strings.
+- Oracle takes target as a parameter ([src/oracle_24_varied.py](src/oracle_24_varied.py)).
+- Rollout and state rendering use generic format ([src/dagger_rollout_varied.py](src/dagger_rollout_varied.py)).
+- Trainer: [src/train_stage2_dagger_varied.py](src/train_stage2_dagger_varied.py).
+
+Currently running: 5000 train pairs, 2 epochs, 4-GPU DDP, Qwen-2.5-14B-Instruct base + Poincaré head.
+
+### OOD evaluation plan (Phase 5)
+
+The whole point is to check whether the task-agnostic LoRA, trained only on varied Game-24, can use a head trained on a *different* task. Countdown (6-number pool, variable 3-digit target) is the test.
+
+Four conditions on the 100-problem Countdown test set, all using the **same** LoRA from above:
+
+| Condition | Head used | What it tests |
+|---|---|---|
+| no-z | none (no injection) | LoRA alone on OOD task |
+| rand-z | norm-matched Gaussian | does *any* vector at boundaries help? |
+| **cd-head-z** | CD-trained head | **main test**: does the LoRA use task-specific geometric signal? |
+| g24-head-z-on-cd | varied-G24 head applied to CD states | wrong geometry on right task — sanity control |
+
+Plus one in-distribution sanity run: same LoRA on varied-G24 test (should beat the same-LoRA no-z baseline).
+
+**Success criteria:** `cd-head-z > no-z`, `cd-head-z > rand-z`, and `cd-head-z > g24-head-z-on-cd` — all on the same LoRA. If so, the LoRA has learned to *use* geometric guidance in general, not just the specific guidance it trained with.
+
+---
+
 ## Pipeline end-to-end
 
 ### 0. Setup
