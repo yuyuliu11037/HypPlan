@@ -131,16 +131,33 @@ We **don't** test `lora + meaningful z` because we'd need a task-specific head t
 
 Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_ood.py](src/score_ood.py); data prep: [data/prepare_ood_evals.py](data/prepare_ood_evals.py).
 
-### Results
-
-(Filled after evals finish; updated 2026-04-25.)
+### Results (2026-04-25, 100 records each)
 
 | Dataset | base | lora (no z) | lora + rand-z |
 |---|---|---|---|
-| ProntoQA (200) | TBD | TBD | TBD |
-| Blocksworld (200) | TBD | TBD | TBD |
+| **ProntoQA** | **54%** | 53% | **37%** |
+| **Blocksworld** (exact-match) | 1% | 0% | 2% |
 
-Hypothesis: all three columns ≈ equal on each task (the LoRA neither helps nor hurts non-arithmetic reasoning, and random-z neither helps nor hurts on top of LoRA). That would confirm the LoRA's effect is *task-specific* — it doesn't catastrophically forget general capabilities, but it also doesn't transfer arithmetic-DAgger gains to deductive logic or planning.
+#### ProntoQA findings
+
+1. **LoRA alone is essentially neutral** (54 → 53, within noise). The varied-target G24 LoRA did **not** catastrophically forget logical reasoning.
+2. **Random z hurts dramatically** (-17pp). The LoRA's z-injection channel is *active* — random noise injected as a virtual token corrupts instruction-following: the model abandons the "reply with one letter" rule and starts explaining its reasoning ("Based on the provided context, Alex is a numpus, …"), often missing the format check even when the content would have been correct.
+3. **Implication**: a meaningful task-specific z (from a ProntoQA-trained Stage-1 head) might *help* via the same channel that random z hurts. Untested without the head.
+
+#### Blocksworld findings
+
+PlanBench's gold uses canonical PDDL format `(unstack blue orange)`; the in-context example in the prompt uses natural-language form ("unstack the blue block from on top of the orange block"). The model copies the in-context style → emits natural-language plans. Our scorer normalises both forms to PDDL before exact-match.
+
+1. **All three conditions ~0% on exact-match**. Qwen2.5-14B fewshot can't solve PlanBench Blocksworld out of the box (consistent with PlanBench paper: GPT-3.5/Llama-2 also struggle here without fine-tuning or external planner help).
+2. **Plan length distribution**: base 9.0 actions, lora 8.8, lora_randz 6.1 vs gold 7.7. LoRA preserves plan-generation behaviour (similar length); rand-z degrades it (7/100 produce zero actions because the noise breaks output).
+3. **Caveat**: exact-match is strict — semantically-valid alternative plans count as wrong. PlanBench's full evaluator runs Fast-Downward to verify plans reach the goal, which we don't. So 0% is an *under-estimate* of correctness; the *trend* (LoRA-no-z ≈ base, rand-z degrades output structure) is the meaningful signal.
+
+#### Takeaway
+
+The LoRA's effect on non-arithmetic reasoning is consistent with the "task-specific transfer" picture:
+- Doesn't catastrophically forget (LoRA-no-z ≈ base on both tasks)
+- Z-channel is alive (rand-z noticeably degrades both tasks)
+- Without a meaningful task-specific z, the channel just adds noise — supports the hypothesis that *task-matched* z signal would matter
 
 ### Constructing the full pipeline (with task-specific heads)
 
