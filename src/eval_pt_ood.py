@@ -30,12 +30,15 @@ def build_question(task: str, rec: dict) -> str:
         return rec["prompt"]
     if task == "pq":
         return rec["init_state_text"]
+    if task == "gc":
+        # SFT was trained with question = format_question(problem)
+        return rec["init_state_text"]
     raise ValueError(task)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--task", required=True, choices=["cd", "bw", "pq"])
+    ap.add_argument("--task", required=True, choices=["cd", "bw", "pq", "gc"])
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--lora_adapter", required=True)
     ap.add_argument("--test_data", required=True)

@@ -43,7 +43,7 @@ def main():
     ap.add_argument("--head_path", default=None,
                      help="For lora_taskz: task-specific Stage-1 head .pt")
     ap.add_argument("--task", default=None,
-                     choices=["prontoqa", "blocksworld"],
+                     choices=["prontoqa", "blocksworld", "graphcolor"],
                      help="For lora_taskz: which task's state renderer to use.")
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--test_data", required=True)
@@ -107,7 +107,9 @@ def main():
 
         if args.task == "prontoqa":
             def state_renderer(rec):
-                # Pre-rendered by data/prepare_ood_evals.py
+                return rec["init_state_text"]
+        elif args.task == "graphcolor":
+            def state_renderer(rec):
                 return rec["init_state_text"]
         else:
             from src.oracle_blocksworld import parse_problem as parse_bw

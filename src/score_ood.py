@@ -139,7 +139,8 @@ def main():
     ap.add_argument("--input", required=True,
                      help="Path or glob to jsonl(s) with 'generation' + 'answer_label'")
     ap.add_argument("--task", required=True,
-                     choices=["prontoqa", "blocksworld", "blocksworld_goal"])
+                     choices=["prontoqa", "blocksworld", "blocksworld_goal",
+                              "graphcolor"])
     ap.add_argument("--show_failures", type=int, default=3)
     args = ap.parse_args()
 
@@ -165,8 +166,16 @@ def main():
             ok = score_prontoqa(gen, gold)
         elif args.task == "blocksworld":
             ok, _ = score_blocksworld(gen, gold)
-        else:  # blocksworld_goal
+        elif args.task == "blocksworld_goal":
             ok, _ = score_blocksworld_goal_reaching(gen, r["prompt"])
+        else:   # graphcolor
+            from src.oracle_graphcolor import (
+                Problem, parse_coloring, score_coloring,
+            )
+            p = Problem(n=r["n"],
+                         edges=tuple(map(tuple, r["edges"])))
+            coloring = parse_coloring(gen, p)
+            ok = score_coloring(p, coloring)
         if ok:
             n_correct += 1
         else:
