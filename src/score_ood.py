@@ -95,11 +95,51 @@ def score_blocksworld(gen: str, gold: str) -> tuple[bool, dict]:
     }
 
 
+def score_blocksworld_goal_reaching(gen: str, prompt: str) -> tuple[bool, dict]:
+    """The proper Blocksworld metric: simulate the model's plan from the
+    initial state, return True iff the goal is achieved (goal_facts ⊆
+    final_state). Stops early on illegal action.
+
+    This matches what PlanBench's full evaluator does (with Fast-Downward
+    verification) — alternative valid plans count as correct, and the model
+    is rewarded for reaching the goal even if it goes on to emit extra
+    actions afterward (which is common; we accept goal-on-the-way plans).
+    """
+    from src.oracle_blocksworld import (
+        parse_problem, apply_action, is_goal, Action,
+    )
+    pred = extract_blocksworld_plan(gen)
+    try:
+        problem = parse_problem(prompt)
+    except Exception as e:
+        return False, {"error": f"parse_problem failed: {e}",
+                        "pred_len": len(pred)}
+    state = problem.init
+    goal_reached_at = -1
+    for step_i, ln in enumerate(pred):
+        inner = ln.strip("()").split()
+        if not inner:
+            break
+        a = Action(op=inner[0], args=tuple(inner[1:]))
+        new_state = apply_action(state, a)
+        if new_state == state:
+            # Illegal action (precondition not satisfied) — stop here.
+            break
+        state = new_state
+        if is_goal(state, problem.goal):
+            goal_reached_at = step_i + 1
+            break
+    return goal_reached_at >= 0, {
+        "goal_reached_at": goal_reached_at, "pred_len": len(pred),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True,
                      help="Path or glob to jsonl(s) with 'generation' + 'answer_label'")
-    ap.add_argument("--task", required=True, choices=["prontoqa", "blocksworld"])
+    ap.add_argument("--task", required=True,
+                     choices=["prontoqa", "blocksworld", "blocksworld_goal"])
     ap.add_argument("--show_failures", type=int, default=3)
     args = ap.parse_args()
 
@@ -123,8 +163,10 @@ def main():
         gold = r["answer_label"]
         if args.task == "prontoqa":
             ok = score_prontoqa(gen, gold)
-        else:
+        elif args.task == "blocksworld":
             ok, _ = score_blocksworld(gen, gold)
+        else:  # blocksworld_goal
+            ok, _ = score_blocksworld_goal_reaching(gen, r["prompt"])
         if ok:
             n_correct += 1
         else:

@@ -36,10 +36,15 @@ def _build_prompt_chat(tokenizer, prompt: str) -> tuple[str, bool]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", required=True,
-                     choices=["base", "lora", "lora_randz"])
+                     choices=["base", "lora", "lora_randz", "lora_taskz"])
     ap.add_argument("--ckpt_dir", default=None,
-                     help="Required for lora and lora_randz modes; the LoRA "
-                          "stage-2 checkpoint dir (e.g. dagger_stage2_24_varied_bal_r4/z_s1234).")
+                     help="Required for lora* modes; the LoRA stage-2 "
+                          "checkpoint dir (e.g. dagger_stage2_24_varied_bal_r4/z_s1234).")
+    ap.add_argument("--head_path", default=None,
+                     help="For lora_taskz: task-specific Stage-1 head .pt")
+    ap.add_argument("--task", default=None,
+                     choices=["prontoqa", "blocksworld"],
+                     help="For lora_taskz: which task's state renderer to use.")
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--test_data", required=True)
     ap.add_argument("--output", required=True)
@@ -60,15 +65,57 @@ def main():
         args.base_model, torch_dtype=torch.bfloat16,
     ).to(device)
 
-    if args.mode in {"lora", "lora_randz"}:
+    if args.mode in {"lora", "lora_randz", "lora_taskz"}:
         if args.ckpt_dir is None:
-            raise ValueError("--ckpt_dir required for lora modes")
+            raise ValueError("--ckpt_dir required for lora* modes")
         print(f"Attaching LoRA {args.ckpt_dir}/lora", flush=True)
         model = PeftModel.from_pretrained(base, str(Path(args.ckpt_dir) / "lora"))
         model.eval()
     else:
         model = base
         model.eval()
+
+    # For lora_taskz, also load task-specific head + the LoRA's up_projector.
+    head = None
+    up_proj = None
+    state_renderer = None
+    if args.mode == "lora_taskz":
+        if args.head_path is None or args.task is None:
+            raise ValueError("--head_path and --task required for lora_taskz")
+        from src.head import HyperbolicHead, UpProjector
+        sd = torch.load(args.head_path, map_location=device, weights_only=False)
+        in_dim = sd["in_dim"]
+        mc = sd["config"]["model"]
+        head = HyperbolicHead(in_dim=in_dim, hyp_dim=mc["hyp_dim"],
+                               hidden_dims=mc["head_hidden_dims"],
+                               manifold=mc["manifold"]).to(device).float()
+        head.load_state_dict(sd["state_dict"]); head.eval()
+        for p in head.parameters(): p.requires_grad = False
+
+        # Up-projector: read LoRA ckpt's config to get up_proj_hidden, then
+        # load weights from <ckpt_dir>/up_projector.pt.
+        with open(Path(args.ckpt_dir) / "config.yaml") as f:
+            ckpt_cfg = yaml.safe_load(f)
+        up_in = mc["hyp_dim"] + (1 if mc["manifold"] == "lorentz" else 0)
+        up_proj = UpProjector(in_dim=up_in,
+                               hidden=int(ckpt_cfg["model"]["up_proj_hidden"]),
+                               out_dim=base.config.hidden_size).to(device).float()
+        up_proj.load_state_dict(torch.load(
+            Path(args.ckpt_dir) / "up_projector.pt", map_location=device,
+            weights_only=False))
+        up_proj.eval()
+
+        if args.task == "prontoqa":
+            def state_renderer(rec):
+                # Pre-rendered by data/prepare_ood_evals.py
+                return rec["init_state_text"]
+        else:
+            from src.oracle_blocksworld import parse_problem as parse_bw
+            from src.oracle_blocksworld import render_state as render_bw
+
+            def state_renderer(rec):
+                p = parse_bw(rec["prompt"])
+                return render_bw(p, p.init)
 
     # For lora_randz, we'll inject one random Gaussian as virtual token.
     # Norm: sqrt(hidden_dim) — same scale as the trained up_projector's
@@ -97,16 +144,29 @@ def main():
                                           return_tensors="pt").to(device)
 
             with torch.no_grad():
-                if args.mode == "lora_randz":
-                    # Forward the prompt to get past_kv, then inject random z
-                    # as one virtual token, then do a single autoregressive
-                    # generate using past_kv.
+                if args.mode in ("lora_randz", "lora_taskz"):
+                    # Forward the prompt to get past_kv, then inject z (random
+                    # for lora_randz, task-head's z for lora_taskz) as one
+                    # virtual token, then continue greedy autoregression.
                     out = model(input_ids=input_ids, use_cache=True)
                     past = out.past_key_values
-                    z = torch.randn(1, 1, hidden_dim, device=device,
-                                     generator=g).to(torch.bfloat16)
-                    z = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-                    z = z * (hidden_dim ** 0.5)
+                    if args.mode == "lora_randz":
+                        z = torch.randn(1, 1, hidden_dim, device=device,
+                                         generator=g).to(torch.bfloat16)
+                        z = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                        z = z * (hidden_dim ** 0.5)
+                    else:
+                        # Compute z = up_proj(head(frozen_base(state_text)))
+                        state_text = state_renderer(rec)
+                        with model.disable_adapter():
+                            ids = tokenizer.encode(state_text,
+                                                     add_special_tokens=True,
+                                                     return_tensors="pt").to(device)
+                            sout = model(input_ids=ids,
+                                          output_hidden_states=True)
+                            last_h = sout.hidden_states[-1][:, -1, :]
+                        z_hyp = head(last_h.float())
+                        z = up_proj(z_hyp).to(torch.bfloat16).unsqueeze(1)
                     out2 = model(inputs_embeds=z, past_key_values=past,
                                   use_cache=True)
                     past = out2.past_key_values

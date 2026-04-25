@@ -133,10 +133,43 @@ Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_o
 
 ### Results (2026-04-25, 100 records each)
 
+#### v1 — eval-only (no task-specific head)
+
 | Dataset | base | lora (no z) | lora + rand-z |
 |---|---|---|---|
 | **ProntoQA** | **54%** | 53% | **37%** |
 | **Blocksworld** (exact-match) | 1% | 0% | 2% |
+
+(Test indices were records 3-202; results in [results/eval_ood/](results/eval_ood/).)
+
+#### v2 — with task-specific Stage-1 heads ([docs/ood_datasets.md § 3](docs/ood_datasets.md))
+
+ProntoQA head: `checkpoints/head_pronto_qwen14b_rank/head.pt`. Blocksworld head: `checkpoints/head_blocksworld_qwen14b_rank/head.pt`. Test indices realigned to records 300-499 (ProntoQA) / 0-199 (Blocksworld) so the head's training set is held out.
+
+| Dataset | base | lora (no z) | lora + rand-z | **lora + task-z** |
+|---|---|---|---|---|
+| **ProntoQA** | 60% | **63%** | 43% | 62% |
+| **Blocksworld** (goal-reaching) | 41% | **43%** | 35% | 33% |
+| Blocksworld (exact-match — under-estimate) | 1% | 0% | 2% | 2% |
+| Blocksworld (avg actions / zero-action) | 9.0 / 0 | 8.8 / 0 | 6.1 / 7 | 5.9 / 15 |
+
+(Results in [results/eval_ood_v2/](results/eval_ood_v2/). Goal-reaching = simulate the model's plan from initial state and check if `goal_facts ⊆ final_state`; matches PlanBench's spirit. Exact-match is strict string equality with gold plan and **drastically under-estimates** correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).)
+
+#### What v2 reveals
+
+1. **Task-z does not beat LoRA-no-z** on either task (62 vs 63 on ProntoQA; tied at 2% on Blocksworld). The properly-trained, dimension-matched, task-specific Stage-1 head's z signal **fails to add value over no-z** when injected into a LoRA that was only trained on G24-varied.
+2. **The LoRA's z-injection channel is corruption-prone, not benefit-prone, on OOD tasks**. Random z severely hurts ProntoQA (-20pp from no-z); task-z is equally noisy on Blocksworld (more zero-action outputs than random-z).
+3. **Why z helps on G24 (slightly) but not on these**: in G24 training, z was injected at *every step boundary* — many opportunities for the LoRA to attend to it. At eval time on ProntoQA / Blocksworld we inject z **once at the start of generation**: a single virtual token before a binary classification (ProntoQA) or a long action sequence (Blocksworld). Single-shot z is too sparse for tasks that don't have a step-boundary structure analogous to G24's `Step N: a op b = r`.
+4. **The G24-LoRA itself is mildly beneficial on ProntoQA** (60 → 63, no z required). Likely an "instruction-following sharpening" side-effect of the SFT-style training, not geometric transfer.
+
+#### Bottom line
+
+Across G24-100, ProntoQA, and Blocksworld, the **HypPlan z signal does not provide robust transfer** beyond what the LoRA gains by simple SFT-on-G24-varied. The hypothesis "LoRA learns to use meaningful z generalizably" is **not supported** by the v2 data: even with a properly-trained task-specific head, `lora + task-z ≤ lora + no-z` on both probes. This is a clean negative result — the geometric machinery's value is, at this scale, dominated by the LoRA's surface-level training.
+
+Possible directions to revisit before declaring HypPlan dead:
+- Inject z at **every paragraph / sentence boundary** in OOD prompts (not just once)
+- Train the LoRA on a *mixture* of arithmetic + deductive / planning tasks — so the LoRA actually learns to read z across task types
+- Use a much larger Stage-1 head (more capacity to distinguish OOD states)
 
 #### ProntoQA findings
 
@@ -181,6 +214,57 @@ For a *proper* OOD test of the "LoRA uses meaningful z" hypothesis on ProntoQA /
 | **Total** | **~1.5 days** | **~3–4 days** |
 
 The simplified pipeline above (no head, just LoRA + rand-z) takes **~30 min**, end-to-end. It tells us whether the LoRA itself is harmful; it doesn't tell us whether a meaningful task-specific z would have helped.
+
+---
+
+## Planning Tokens baseline ([Wang et al. 2023](https://arxiv.org/abs/2310.05707))
+
+Method: prepend a discrete *planning token* before each reasoning step. Train SFT-style with the augmented data. Tokens summarize the step's "type" — for arithmetic problems the paper uses operator categories (`<PLAN:+>`, `<PLAN:->`, `<PLAN:*>`, `<PLAN:/>`) plus `<PLAN:ANS>`.
+
+We reproduce + extend in two phases:
+
+### Phase A — implementation correctness check (Phi-1.5 + GSM8K)
+
+The paper reports Phi-1.5 + GSM8K: **baseline 12.5% → arithmetic-PT 15.0%** (+2.5pp).
+
+Our run (Phi-1.5, LoRA r=16, 10 epochs, bf16, DDP-3 gloo on 3 GPUs ≈ 18 min/run; eval on 355/1319 records, see [src/train_sft_gsm8k.py](src/train_sft_gsm8k.py) + [src/eval_gsm8k.py](src/eval_gsm8k.py)):
+
+| | Baseline (no PT) | Arithmetic PT | Δ |
+|---|---|---|---|
+| Phi-1.5 GSM8K (paper) | 12.5% | 15.0% | +2.5pp |
+| Phi-1.5 GSM8K (ours) | **30.4%** | **32.1%** | **+1.7pp** |
+
+Trend matches (small positive Δ for PT) — implementation verified. Absolute numbers higher because our prompt format / decoding setup differs (LoRA only, raw `Question:/Answer:` template, greedy).
+
+### Phase B — Planning Tokens applied to the 3 OOD tasks
+
+We adapt the arithmetic variant (5-token vocab) per task and SFT a Qwen2.5-14B + LoRA on each task's training data. Data prep: [data/prepare_pt_ood_data.py](data/prepare_pt_ood_data.py).
+
+| Task | Planning tokens | Train data | Train size |
+|---|---|---|---|
+| **CD** | `<PLAN:+/-/*//>` per step + `<PLAN:ANS>` | `data/cd_train_sft.jsonl` (existing CD trajectories) | 1000 |
+| **BW** | `<PLAN:PICKUP/PUTDOWN/STACK/UNSTACK>` + `<PLAN:ANS>` | PlanBench gold plans (records 200-449) | 250 |
+| **PQ** | `<PLAN:DERIVE_TRUE/DERIVE_FALSE>` + `<PLAN:ANS>` | Oracle-generated proofs from forward chaining | 250 |
+
+SFT: Qwen2.5-14B + LoRA r=16, DDP-2 gloo (each task on 2 GPUs in parallel) — total ~7 min wall for all 3.
+
+#### Results
+
+| Task | Base Qwen fewshot | HypPlan z-arm + task-z | **PT-SFT** |
+|---|---|---|---|
+| **PQ** (200) | 60% | 62% | **52.5%** ❌ |
+| **BW** (goal-reaching, 200) | 41% | 33% | **94.5%** ✅ |
+| **CD** (strict validation, 100) | 0% | 0% | **0%** (lenient string-match: 58%) |
+
+Apples-to-oranges with HypPlan: PT-SFT trains *on each task's training data*, while HypPlan trains only on G24 and probes the OOD transfer. Even so, three distinct failure modes show up:
+
+- **PQ — format learning, not reasoning**: PT-SFT *underperforms* base. Generations have correct planning-token format but mostly default to "Answer: A" regardless of input. The model learned to mimic the trajectory shape, not the deduction.
+- **BW — memorization, not planning**: PT-SFT crushes both base and HypPlan because the train set is 250 records of PlanBench's gold plans, and the test set comes from the same distribution. The model essentially regurgitates similar action sequences. This 94.5% is a **memorization ceiling**, not evidence of compositional planning.
+- **CD — hallucinated arithmetic**: PT-SFT lenient (just match `Answer: 647` as a substring): 58%. Strict (math correct AND uses only pool numbers, via [src/evaluate_generic.py](src/evaluate_generic.py)): **0%**. The model writes plausible-looking arithmetic chains, but along the way it injects numbers that aren't in the pool — e.g., "562 + 85 = 647" when 85 isn't a remaining number. Reaches the target, doesn't actually solve the puzzle.
+
+**Bottom line:** task-specific PT-SFT does not give us a clean "this is what good reasoning transfer looks like" baseline. BW seems to win but actually memorizes; CD's number is a scoring artifact; PQ regresses. So the comparison with HypPlan stays at the OOD-transfer question — neither approach achieves robust transfer at our training scale.
+
+Eval scripts: [src/eval_pt_ood.py](src/eval_pt_ood.py); raw outputs in [results/eval_pt_ood/](results/eval_pt_ood/).
 
 ---
 

@@ -1,14 +1,18 @@
-# OOD eval datasets: ProntoQA + Blocksworld
+# OOD eval datasets: ProntoQA + Blocksworld + Countdown
 
-We use these as **out-of-domain probes** for the LoRA trained on Game-of-24-varied. The LoRA itself is **never** trained on these tasks — only the Stage-1 hyperbolic head is, so that we have a meaningful task-specific `z` to inject at eval time.
+We use these as **out-of-domain probes** for the LoRA trained on Game-of-24-varied. Two probe modes:
+
+1. **HypPlan**: the G24-varied LoRA + a task-specific Stage-1 hyperbolic head. The LoRA itself is **never** trained on these tasks — only the Stage-1 head is, so that we have a meaningful task-specific `z` to inject at eval time.
+2. **Planning-Tokens (PT) baseline**: a separate Qwen2.5-14B + LoRA SFT'd on each task's own training data with discrete operator/action planning tokens prepended to each step. Different setup from HypPlan (in-domain training, not OOD transfer), used as a reference baseline.
 
 This doc covers:
 1. What each dataset looks like
 2. The exact prompt we feed the model at eval
 3. Where the data comes from and how we sliced it
 4. What ground-truth labels we use
-5. Scoring rules
+5. Scoring rules (including CD strict vs lenient + BW exact-match vs goal-reaching)
 6. **Stage-1 head training pipeline** for each task (oracle → tree → cache → head)
+7. **Planning-Tokens SFT baseline** — train Qwen2.5-14B on each task's planning-token-augmented data and eval
 
 ---
 
@@ -155,13 +159,51 @@ Schema:
 
 ### Scoring
 
+We compute **two** metrics on the model's output:
+
+#### Metric A: exact-match (strict, fast, often misleading)
+
 [src/score_ood.py](../src/score_ood.py) `score_blocksworld`:
 
-1. Extract every line in the generation that matches `^\([\w\- ]+\)\s*$` — i.e. the model's action list.
+1. Extract every action line: `(action arg1 ...)` or its natural-language equivalent (the in-context example uses NL phrasing like "unstack the yellow block from on top of the blue block"; we normalize both to PDDL form).
 2. Stop at `[PLAN END]` or a new `[STATEMENT]` marker (model sometimes hallucinates more problems).
-3. **Exact-list match** vs the ground-truth lines.
+3. Compare the extracted Python list to the gold list with `==`.
 
-Exact-match is strict — semantically-valid alternative plans count as wrong. PlanBench's full evaluator runs Fast-Downward to verify any plan reaches the goal, but we deliberately use exact-match here because we lack a planner in the loop and want a fast, reproducible scorer for an OOD probe.
+This is what we reported as "1%/0%/2%/2%" — those numbers **drastically under-estimate** correctness because:
+- The model may emit the gold plan AND keep generating extra actions afterward → exact-match fails even though the goal IS reached at step 4.
+- Multiple optimal plans may exist; picking a different valid one → exact-match fails.
+
+#### Metric B: goal-reaching (proper Blocksworld metric)
+
+[src/score_ood.py](../src/score_ood.py) `score_blocksworld_goal_reaching`:
+
+1. Parse the puzzle's initial state and goal facts from the prompt ([src/oracle_blocksworld.py](../src/oracle_blocksworld.py) `parse_problem`).
+2. Simulate the model's predicted action sequence forward from the initial state, applying preconditions/effects of each action.
+3. After **each** applied action, check whether `goal_facts ⊆ current_state`.
+4. **Correct** iff the goal is achieved at any step (and we stop at the first illegal action — i.e. one whose preconditions don't hold).
+
+This matches the spirit of PlanBench's Fast-Downward verification — alternative valid plans count, and the model is rewarded for finding a working plan even if it goes on to spam extra actions.
+
+#### Concrete example (real test case from base mode)
+
+```
+Puzzle: get   blue on yellow,   orange on blue
+Initial:      blue on orange,   orange on red,   yellow on table
+
+GOLD plan (4 actions):                   MODEL plan (8 actions, extracted):
+  (unstack blue orange)                    (unstack blue orange)         ✓
+  (stack blue yellow)                      (stack blue yellow)           ✓
+  (unstack orange red)                     (unstack orange red)          ✓
+  (stack orange blue)                      (stack orange blue)  ← goal! ✓
+                                           (unstack blue orange)  ← extra
+                                           (stack blue yellow)
+                                           (unstack orange red)
+                                           (stack orange blue)
+```
+- Metric A (exact-match): **WRONG** (8 actions ≠ 4 actions)
+- Metric B (goal-reaching): **CORRECT** (goal achieved at step 4)
+
+We report **both** metrics; goal-reaching is the meaningful one.
 
 ---
 
@@ -268,9 +310,10 @@ HYPPLAN_DIST_BACKEND=gloo CUDA_VISIBLE_DEVICES=7 \
 # `lora_taskz` will use --head_override pointing at the new task-specific head.
 # (Eval driver update + final results table forthcoming.)
 
-# Scoring (already supports both tasks)
-python -m src.score_ood --task prontoqa    --input results/eval_ood/prontoqa_*.jsonl
-python -m src.score_ood --task blocksworld --input results/eval_ood/blocksworld_*.jsonl
+# Scoring
+python -m src.score_ood --task prontoqa            --input results/eval_ood/prontoqa_*.jsonl
+python -m src.score_ood --task blocksworld         --input results/eval_ood/blocksworld_*.jsonl   # exact-match (under-estimate)
+python -m src.score_ood --task blocksworld_goal    --input results/eval_ood/blocksworld_*.jsonl   # goal-reaching (proper)
 ```
 
 ### Time budget — actual vs original estimate
@@ -281,3 +324,77 @@ python -m src.score_ood --task blocksworld --input results/eval_ood/blocksworld_
 | Blocksworld oracle + tree gen + head | 3–4 days | ~1 hour (built minimal Python BFS for the 4-op domain instead of using Fast-Downward) |
 
 The original README estimate assumed we'd integrate a real PDDL planner and write proper task-rendering on par with Game-24's; in practice, a minimal hand-written BFS oracle was enough to populate trees with sensible v-values, since even un-optimal-distance v-values give a margin-ranking head useful supervision (state nearer to goal/decidable should have smaller `|z|`).
+
+---
+
+## 5. Planning-Tokens (PT) SFT baseline
+
+To compare HypPlan against [Planning Tokens (Wang et al. 2023)](https://arxiv.org/abs/2310.05707) on the same 3 OOD probes, we SFT a Qwen2.5-14B LoRA on each task's training data with operator/action tokens inserted before each reasoning step.
+
+### Phi-1.5 GSM8K verification first
+
+Before running on OOD tasks, we verified our PT implementation against the paper's reported numbers. Phi-1.5 + GSM8K, LoRA r=16, 10 epochs:
+- Paper: baseline 12.5% → arithmetic-PT 15.0% (+2.5pp)
+- Ours: baseline 30.4% → arithmetic-PT 32.1% (+1.7pp, on a 355-record sample)
+
+Trend matches. Higher absolute numbers are due to slight prompt format differences. See [src/train_sft_gsm8k.py](../src/train_sft_gsm8k.py), [src/eval_gsm8k.py](../src/eval_gsm8k.py).
+
+### Per-task PT vocabulary + training data
+
+Built by [data/prepare_pt_ood_data.py](../data/prepare_pt_ood_data.py):
+
+| Task | Planning tokens | Train data source |
+|---|---|---|
+| **CD** | `<PLAN:+>`, `<PLAN:->`, `<PLAN:*>`, `<PLAN:/>`, `<PLAN:ANS>` | Existing CD trajectories `data/cd_train_sft.jsonl` (1000 records) |
+| **BW** | `<PLAN:PICKUP>`, `<PLAN:PUTDOWN>`, `<PLAN:STACK>`, `<PLAN:UNSTACK>`, `<PLAN:ANS>` | PlanBench gold plans (records 200-449, 250 records) |
+| **PQ** | `<PLAN:DERIVE_TRUE>`, `<PLAN:DERIVE_FALSE>`, `<PLAN:ANS>` | Oracle-generated forward-chaining proofs (records 0-249, 250 records) |
+
+For PQ we generate proofs from `src/oracle_pronto.py`'s forward chaining (greedy first-applicable rule until query is decidable).
+
+### Training (Qwen2.5-14B, LoRA r=16)
+
+Configs: `configs/sft_pt_{cd,bw,pq}_qwen14b.yaml`. Driver: [src/train_sft_gsm8k.py](../src/train_sft_gsm8k.py) (DDP-2 gloo). 3 SFT runs in parallel, 2 GPUs each (6 GPUs total, ~7 min wall for all three).
+
+### Eval
+
+Driver: [src/eval_pt_ood.py](../src/eval_pt_ood.py). Builds `Question: <q>\nAnswer:` prompts matching the SFT format and decodes greedy. Per-task scoring uses the same scorers as HypPlan eval, so results are directly comparable.
+
+### Scoring details for CD (strict vs lenient)
+
+CD generations look syntactically clean — model emits `<PLAN:OP> Step N: a op b = r. ...` lines and finishes with `<PLAN:ANS> Answer: T`. Two scorers:
+
+- **Lenient** (string match): does `Answer:\s*N` appear in the output with `N == target`? → 58/100 = 58%
+- **Strict** (`src/evaluate_generic.parse_and_validate_generic`): also verifies (a) each step's arithmetic is correct, (b) only numbers from the current `remaining` pool are used as operands. → **0/100 = 0%**
+
+The 58pp gap reveals that the PT-SFT model is **hallucinating numbers**:
+
+```
+pool=[5, 8, 8, 9, 9, 75], target=647
+gen: <PLAN:*> Step 1: 5 * 8 = 40. Remaining: 8 9 9 40 75
+     <PLAN:+> Step 2: 8 + 9 = 17. Remaining: 9 17 40 75
+     <PLAN:-> Step 3: 75 - 17 = 58. Remaining: 9 40 58
+     <PLAN:*> Step 4: 9 * 58 = 522. Remaining: 40 522
+     <PLAN:+> Step 5: 40 + 522 = 562. Remaining: 562
+     <PLAN:+> Step 6: 562 + 85 = 647.   ← 85 is NOT in remaining!
+     <PLAN:ANS> Answer: 647
+```
+
+The model writes "Answer: 647" (matches gold) but step 6 used the number 85 which was never in the pool. Lenient says correct, strict says wrong. We report strict.
+
+### Final results
+
+| Task | Base Qwen fewshot | HypPlan z-arm + task-z | **PT-SFT** |
+|---|---|---|---|
+| **PQ** (200) | 60% | 62% | **52.5%** ❌ |
+| **BW** (goal-reaching, 200) | 41% | 33% | **94.5%** ✅ |
+| **CD** (strict, 100) | 0% | 0% | **0%** (lenient: 58%) |
+
+### Interpretation per task
+
+- **PQ** — *format learning, not reasoning*. PT-SFT regresses below base because the model overfits to "emit Answer: A by default" given the small training set + biased label distribution. Short generations like `<PLAN:DERIVE_TRUE> Step 1: ... Answer: A` regardless of question content.
+- **BW** — *memorization*. 94.5% is misleading: PT-SFT trains on 250 records of PlanBench's gold plans and the test set comes from the same distribution. The model regurgitates structurally similar plans that mostly happen to reach the goal. Not evidence of compositional planning.
+- **CD** — *hallucinated arithmetic*. Goal achieved iff "Answer: T" string appears (lenient = 58%); proper validation drops it to 0%. Don't trust the lenient number.
+
+### Bottom-line comparison vs HypPlan
+
+PT-SFT is task-specific in-domain training, fundamentally different from HypPlan's G24-only training + OOD probes. PT-SFT shows what *task-specific SFT* achieves at this scale (memorization on BW, format-mimicry on PQ, hallucination on CD). HypPlan's question is whether the *transfer hypothesis* works — whether a task-agnostic LoRA + meaningful task-z generalizes — and we showed it doesn't, robustly.

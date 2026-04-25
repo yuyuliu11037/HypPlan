@@ -1,0 +1,19 @@
+model:
+  base_model: "microsoft/phi-1_5"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "dense"]
+data:
+  train_data: "data/gsm8k_train_baseline.jsonl"
+  test_data: "data/gsm8k_test.jsonl"
+  max_seq_len: 512
+training:
+  lr: 2.0e-4
+  epochs: 10
+  batch_size: 8
+  grad_accum: 4
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  grad_clip: 1.0
+  output_dir: "checkpoints/sft_gsm8k_phi15_baseline"
