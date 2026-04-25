@@ -1,11 +1,11 @@
 data:
   test_data: data/24_varied_test.jsonl
   train_data: data/24_varied_train.jsonl
-  train_limit: 20
+  train_limit: 100
 eval:
   max_new_tokens: 256
   max_z_injections: 3
-  output_dir: results/dagger_stage2_24_varied_qwen14b_smoke
+  output_dir: results/dagger_stage2_24_varied_qwen14b
   temperature: 0.0
 model:
   base_model: Qwen/Qwen2.5-14B-Instruct
@@ -19,10 +19,10 @@ training:
   grad_clip: 0.3
   lr: 5.0e-5
   max_steps: 3
-  output_dir: checkpoints/dagger_stage2_24_varied_qwen14b_smoke
+  output_dir: checkpoints/dagger_stage2_24_varied_qwen14b
   rollout_max_new_tokens: 256
-  rollout_temperature: 0.7
-  rollout_top_p: 0.95
+  rollout_temperature: 0.3
+  rollout_top_p: 0.9
   rollouts_per_problem: 1
   seed: 1234
   weight_decay: 0.0

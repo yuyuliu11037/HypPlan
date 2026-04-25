@@ -35,7 +35,9 @@ def _setup_distributed():
     else:
         device = torch.device("cpu")
     if distributed:
-        dist.init_process_group(backend="nccl")
+        from datetime import timedelta
+        backend = os.environ.get("HYPPLAN_DIST_BACKEND", "gloo")
+        dist.init_process_group(backend=backend, timeout=timedelta(hours=8))
         rank = dist.get_rank()
         world_size = dist.get_world_size()
     else:
@@ -95,6 +97,8 @@ def main():
     ds = Game24SFTChatDataset(
         tokenizer, config["data"]["train_data"],
         max_seq_len=config["data"].get("max_seq_len", 800),
+        prompt_style=config["data"].get("prompt_style", "fewshot"),
+        unique_problems=config["data"].get("unique_problems", True),
     )
 
     sampler = None

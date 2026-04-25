@@ -24,6 +24,7 @@ from src.tree_data_generic import render_state_generic
 
 
 BOUNDARY_RE = re.compile(r"\nStep \d+:")
+ANSWER_RE = re.compile(r"Answer\s*:")
 _STEP_PREFIX_NOISE = re.compile(r"(Step\s+\d+:)[\s:=]+")
 
 
@@ -107,9 +108,15 @@ def _parse_history_from_text(step1_text: str) -> tuple:
 def rollout_one(model, tokenizer, head, up_proj, pool: list, target: int,
                 device, use_z: bool = True, temperature: float = 0.7,
                 top_p: float = 0.95, max_new_tokens: int = 256,
-                max_steps: int = 3, random_z: bool = False) -> Rollout:
+                max_steps: int = 3, random_z: bool = False,
+                prompt_builder=None) -> Rollout:
     """Generate one trajectory for (pool, target). Returns a Rollout with
-    per-boundary oracle labels."""
+    per-boundary oracle labels.
+
+    `prompt_builder` (optional): callable(tokenizer, pool, target) -> (text, add_special)
+    overriding the default generic prompt. Used at eval time to evaluate the
+    LoRA with task-native fewshot prompts (e.g. fixed-24 prompt for G24-100).
+    """
     pool = list(pool)
     result = Rollout(pool=pool, target=int(target))
 
@@ -121,10 +128,11 @@ def rollout_one(model, tokenizer, head, up_proj, pool: list, target: int,
         result.final_remaining = tuple(Fraction(int(x)) for x in pool)
         return result
 
-    # Generic fewshot prompt; append "Step 1:" to prime rollout parsing
-    # identically to fixed-target. Trivial cases were handled above.
-    prompt_text, add_special = fewshot_chat_prompt_generic(tokenizer, pool,
-                                                            target)
+    if prompt_builder is None:
+        prompt_text, add_special = fewshot_chat_prompt_generic(
+            tokenizer, pool, target)
+    else:
+        prompt_text, add_special = prompt_builder(tokenizer, pool, target)
     prompt_text = prompt_text + "Step 1:"
 
     input_ids = tokenizer.encode(
@@ -180,6 +188,11 @@ def rollout_one(model, tokenizer, head, up_proj, pool: list, target: int,
         full_gen = tokenizer.decode(generated_ids, skip_special_tokens=True)
         full_with_prefix = "Step 1:" + full_gen
         cur_count = len(BOUNDARY_RE.findall(full_gen))
+        answer_seen = ANSWER_RE.search(full_gen) is not None
+        # Treat "Answer:" as a step-closing boundary too so 1-step solutions
+        # that end with "... = T. Answer: T" get parsed and scored.
+        if answer_seen and cur_count <= prev_boundary_count:
+            cur_count = prev_boundary_count + 1
 
         if cur_count > prev_boundary_count:
             prev_boundary_count = cur_count

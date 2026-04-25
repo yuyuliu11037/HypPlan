@@ -144,7 +144,8 @@ class UpProjector(nn.Module):
     vector (no inverse exp-map); the stage-2 LoRA learns what to do with it.
     """
 
-    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+    def __init__(self, in_dim: int, hidden: int, out_dim: int,
+                 zero_init: bool = False):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
@@ -152,6 +153,10 @@ class UpProjector(nn.Module):
             nn.Linear(hidden, out_dim),
             nn.LayerNorm(out_dim),
         )
+        if zero_init:
+            ln = self.net[-1]
+            nn.init.zeros_(ln.weight)
+            nn.init.zeros_(ln.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.net(z)

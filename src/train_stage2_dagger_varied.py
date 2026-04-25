@@ -58,10 +58,17 @@ def setup_distributed():
     else:
         device = torch.device("cpu")
     if distributed:
-        dist.init_process_group(
-            backend="nccl", device_id=device,
-            timeout=timedelta(hours=8),
-        )
+        backend = os.environ.get("HYPPLAN_DIST_BACKEND", "gloo")
+        if backend == "nccl":
+            dist.init_process_group(
+                backend="nccl", device_id=device,
+                timeout=timedelta(hours=8),
+            )
+        else:
+            dist.init_process_group(
+                backend=backend,
+                timeout=timedelta(hours=8),
+            )
         rank = dist.get_rank()
         world_size = dist.get_world_size()
     else:
@@ -257,16 +264,22 @@ def collect_training_pairs(model, tokenizer, head, up_proj, records,
                              top_p: float, rollouts_per_problem: int,
                              max_new_tokens: int, max_steps: int,
                              log_every: int = 100,
-                             random_z: bool = False):
+                             random_z: bool = False,
+                             rank: int = 0):
     model.eval()
     pairs = []
     stats = {"n_rollouts": 0, "n_solved": 0,
              "stopped_reason": {}, "dropped_at_step": {},
              "n_boundaries_total": 0, "n_boundaries_invalid": 0,
              "n_boundaries_empty_oracle": 0}
+    per_rollout_times: list[float] = []
 
     for pi, rec in enumerate(records):
         pool = rec["pool"]; target = rec["target"]
+        t_rec = time.time()
+        if pi < 5 or pi % 10 == 0:
+            print(f"[r{rank}] starting pi={pi} pool={pool} target={target}",
+                  flush=True)
         for ri in range(rollouts_per_problem):
             r = rollout_one(model, tokenizer, head, up_proj, pool, target,
                              device, use_z=use_z, temperature=temperature,
@@ -296,12 +309,22 @@ def collect_training_pairs(model, tokenizer, head, up_proj, records,
                     "history_before": bdy.history_before,
                     "winning_ops": bdy.winning_ops,
                 })
+        dt = time.time() - t_rec
+        per_rollout_times.append(dt)
+        # Flag any rollout > 20s as suspicious outlier
+        if dt > 20.0:
+            print(f"[r{rank}] SLOW pi={pi} dt={dt:.1f}s pool={pool} target={target} "
+                  f"reason={r.stopped_reason}", flush=True)
 
         if (pi + 1) % log_every == 0:
             solved = stats["n_solved"]; total = stats["n_rollouts"]
-            print(f"  rollout {pi+1}/{len(records)}: "
+            recent = per_rollout_times[-log_every:]
+            avg = sum(recent)/len(recent)
+            mx = max(recent); mn = min(recent)
+            print(f"[r{rank}] rollout {pi+1}/{len(records)}: "
                   f"solved={solved}/{total}={solved/max(total,1):.2%} "
-                  f"pairs={len(pairs)}", flush=True)
+                  f"pairs={len(pairs)} "
+                  f"dt(avg/min/max)={avg:.2f}/{mn:.2f}/{mx:.2f}s", flush=True)
 
     stats["drop_rate"] = (stats["n_boundaries_invalid"] /
                            max(stats["n_boundaries_total"], 1))
@@ -348,6 +371,7 @@ def main():
     seed = int(config["training"].get("seed", 1234))
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
 
+    print(f"[r{rank}] A: about to load_base_and_head", flush=True)
     tokenizer, model, head, up_proj = load_base_and_head(
         base_path=config["model"]["base_model"],
         head_path=config["model"]["head_checkpoint"],
@@ -357,38 +381,32 @@ def main():
         lora_dropout=float(config["model"]["lora_dropout"]),
         device=device,
     )
-    if distributed:
-        dist.barrier()
+    print(f"[r{rank}] B: post-load (barrier skipped)", flush=True)
+    print(f"[r{rank}] C: ready", flush=True)
 
     all_records = load_varied_records(config["data"]["train_data"],
                                         skip_trivial=True)
     if int(config["data"].get("train_limit", -1)) > 0:
         all_records = all_records[: int(config["data"]["train_limit"])]
     local_records = all_records[rank::world_size]
-    if rank == 0:
-        print(f"arm={arm_tag} use_z={args.use_z} random_z={args.random_z} "
-              f"world_size={world_size} "
-              f"n_train_records_total={len(all_records)} "
-              f"local_shard={len(local_records)}", flush=True)
+    print(f"[r{rank}] D: records loaded n={len(local_records)}", flush=True)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     trainable_params += [p for p in up_proj.parameters() if p.requires_grad]
-    if rank == 0:
-        print(f"trainable params: "
-              f"lora={sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M "
-              f"up_proj={sum(p.numel() for p in up_proj.parameters() if p.requires_grad)/1e6:.2f}M",
-              flush=True)
+    print(f"[r{rank}] E: trainable_params built", flush=True)
 
     lr = float(config["training"]["lr"])
     wd = float(config["training"].get("weight_decay", 0.0))
     epochs = int(config["training"]["epochs"])
     optimizer = AdamW(trainable_params, lr=lr, weight_decay=wd)
+    print(f"[r{rank}] F: optimizer built", flush=True)
     grad_clip = float(config["training"].get("grad_clip", 1.0))
 
     log_path = out_root / "train.jsonl"
 
     global_step = 0
     for epoch in range(epochs):
+        print(f"[r{rank}] G: epoch {epoch} entered", flush=True)
         epoch_start = time.time()
         if rank == 0:
             print(f"\n=== epoch {epoch} [arm={arm_tag}] ===", flush=True)
@@ -406,6 +424,7 @@ def main():
             max_steps=int(config["training"].get("max_steps", 3)),
             log_every=max(50 // max(world_size, 1), 25),
             random_z=args.random_z,
+            rank=rank,
         )
 
         if distributed:

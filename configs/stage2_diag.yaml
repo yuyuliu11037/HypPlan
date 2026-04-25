@@ -1,7 +1,7 @@
 data:
   test_data: data/24_varied_test.jsonl
   train_data: data/24_varied_train.jsonl
-  train_limit: 2000
+  train_limit: 200
 eval:
   max_new_tokens: 256
   max_z_injections: 3
@@ -15,7 +15,7 @@ model:
   lora_r: 16
   up_proj_hidden: 2048
 training:
-  epochs: 2                # scaled from 3 after NCCL timeout crashes
+  epochs: 1                # scaled from 3 after NCCL timeout crashes
   grad_clip: 0.3
   lr: 5.0e-5
   max_steps: 3

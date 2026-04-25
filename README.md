@@ -106,6 +106,67 @@ Plus one in-distribution sanity run: same LoRA on varied-G24 test (should beat t
 
 ---
 
+## OOD generalization probes (no head training): ProntoQA + Blocksworld
+
+The Countdown eval above tests OOD transfer **within arithmetic**. To probe whether the LoRA learned anything that helps on **non-arithmetic** reasoning, we run two more OOD test sets without building task-specific heads:
+
+- **ProntoQA** ([renma/ProntoQA](https://huggingface.co/datasets/renma/ProntoQA), 200 records sampled): synthetic deductive reasoning. Given facts and rules, decide whether a statement is True (A) or False (B).
+- **Blocksworld** ([tasksource/planbench](https://huggingface.co/datasets/tasksource/planbench), `task_1_plan_generation`, 200 blocksworld records sampled): natural-language symbolic planning. Output an action sequence like `(unstack red blue)`.
+
+### Why no head?
+
+These tasks aren't arithmetic — there's no `winning_ops`-style oracle, and `rollout_one`'s step-boundary detection (`Step N: a op b = r`) doesn't fire. Building proper Stage-1 heads for them would require ~3–5 days each (oracle + tree enumeration + hidden-state cache + head training); see "Constructing the full pipeline" below for the recipe.
+
+### Three eval conditions
+
+For each dataset we run three conditions, all using the LoRA-trained checkpoint `checkpoints/dagger_stage2_24_varied_bal_r4/z_s1234`:
+
+| Condition | LoRA | z injection | Tests |
+|---|---|---|---|
+| **base** | off | none | reference: base Qwen2.5-14B fewshot |
+| **lora** | on | none | does our LoRA hurt unrelated reasoning? |
+| **lora-randz** | on | one random Gaussian (norm = √hidden) injected once at start of generation | does the LoRA "z-handling" survive on radically different tasks, or is it just noise? |
+
+We **don't** test `lora + meaningful z` because we'd need a task-specific head to compute one.
+
+Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_ood.py](src/score_ood.py); data prep: [data/prepare_ood_evals.py](data/prepare_ood_evals.py).
+
+### Results
+
+(Filled after evals finish; updated 2026-04-25.)
+
+| Dataset | base | lora (no z) | lora + rand-z |
+|---|---|---|---|
+| ProntoQA (200) | TBD | TBD | TBD |
+| Blocksworld (200) | TBD | TBD | TBD |
+
+Hypothesis: all three columns ≈ equal on each task (the LoRA neither helps nor hurts non-arithmetic reasoning, and random-z neither helps nor hurts on top of LoRA). That would confirm the LoRA's effect is *task-specific* — it doesn't catastrophically forget general capabilities, but it also doesn't transfer arithmetic-DAgger gains to deductive logic or planning.
+
+### Constructing the full pipeline (with task-specific heads)
+
+For a *proper* OOD test of the "LoRA uses meaningful z" hypothesis on ProntoQA / Blocksworld, you'd need a task-specific Stage-1 head. The same recipe used for Countdown:
+
+1. **Define the oracle.** ProntoQA: `winning_inferences(state, query) → set of valid one-step rule applications`. Blocksworld: `winning_actions(state, goal) → set of optimal/admissible next moves`. Need a planner (e.g. fast-downward) for ground truth on Blocksworld; ProntoQA's deductive structure is smaller so brute-force BFS works.
+2. **Enumerate trees.** Build per-problem state trees with depth gap to a success leaf as the v-value.
+3. **Cache hidden states.** Forward each rendered state text through the frozen base model; save last-token hidden state as float16 memmap.
+4. **Train head.** Same Stage-1 origin-ranking script, just point to the new tree dir and state-rendering function.
+5. **Eval.** Run `eval_ood_generic.py` with `--mode lora_z --head_override checkpoints/head_<task>/head.pt`.
+
+### Time estimate per task
+
+| Step | ProntoQA | Blocksworld |
+|---|---|---|
+| Oracle + state representation | 1 day | 2 days (need PDDL planner) |
+| Tree enumeration on 1090 problems | 30 min | 4–8 hr (planner is slow on ≥6-block instances) |
+| Hidden-state caching (Qwen2.5-14B forward) | 1 hr (4 GPUs) | 1.5 hr (4 GPUs) |
+| Stage-1 head training | 30 min (4 GPUs) | 30 min (4 GPUs) |
+| Eval (with head, 3 conditions × 200 records) | 30 min (sharded) | 1 hr (longer plans) |
+| **Total** | **~1.5 days** | **~3–4 days** |
+
+The simplified pipeline above (no head, just LoRA + rand-z) takes **~30 min**, end-to-end. It tells us whether the LoRA itself is harmful; it doesn't tell us whether a meaningful task-specific z would have helped.
+
+---
+
 ## Pipeline end-to-end
 
 ### 0. Setup

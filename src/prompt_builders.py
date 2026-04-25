@@ -94,9 +94,58 @@ def fewshot_chat_prompt_24(tokenizer, problem: str) -> Tuple[str, bool]:
     return chat, False
 
 
+FEWSHOT_SYSTEM_24_PLAN = (
+    "You are a careful arithmetic solver. Use the four given numbers and "
+    "basic arithmetic operations (+, -, *, /) to obtain 24. Each number "
+    "must be used exactly once. Before each step, emit a planning tag "
+    "(one of <PLAN:+>, <PLAN:->, <PLAN:*>, <PLAN:/>, <PLAN:ANS>) that "
+    "indicates the operator used next. Respond in the format shown in the "
+    "examples, ending with '<PLAN:ANS> Answer: 24'. Do not add any other text."
+)
+
+FEWSHOT_EXAMPLES_24_PLAN = [
+    (
+        "Problem: 4 4 6 8",
+        "<PLAN:+> Step 1: 4 + 8 = 12. Remaining: 4 6 12\n"
+        "<PLAN:-> Step 2: 6 - 4 = 2. Remaining: 2 12\n"
+        "<PLAN:*> Step 3: 2 * 12 = 24. <PLAN:ANS> Answer: 24",
+    ),
+    (
+        "Problem: 2 9 10 12",
+        "<PLAN:*> Step 1: 12 * 2 = 24. Remaining: 9 10 24\n"
+        "<PLAN:-> Step 2: 10 - 9 = 1. Remaining: 1 24\n"
+        "<PLAN:*> Step 3: 24 * 1 = 24. <PLAN:ANS> Answer: 24",
+    ),
+    (
+        "Problem: 4 9 10 13",
+        "<PLAN:-> Step 1: 13 - 10 = 3. Remaining: 3 4 9\n"
+        "<PLAN:-> Step 2: 9 - 3 = 6. Remaining: 4 6\n"
+        "<PLAN:*> Step 3: 4 * 6 = 24. <PLAN:ANS> Answer: 24",
+    ),
+]
+
+
+def fewshot_chat_prompt_24_plan(tokenizer, problem: str) -> Tuple[str, bool]:
+    """Like fewshot_chat_prompt_24 but with <PLAN:op> tags before each step.
+
+    Does NOT prime 'Step 1:' — the assistant turn starts empty so the model
+    can generate the planning token first.
+    """
+    nums = problem.replace(",", " ")
+    msgs = [{"role": "system", "content": FEWSHOT_SYSTEM_24_PLAN}]
+    for uq, aa in FEWSHOT_EXAMPLES_24_PLAN:
+        msgs.append({"role": "user", "content": uq})
+        msgs.append({"role": "assistant", "content": aa})
+    msgs.append({"role": "user", "content": f"Problem: {nums}"})
+    chat = _apply_chat_template_no_think(tokenizer, msgs)
+    # No priming — model generates <PLAN:...> then Step 1: etc.
+    return chat, False
+
+
 PROMPT_BUILDERS_24: dict[str, Callable[[object, str], Tuple[str, bool]]] = {
     "sft": sft_prompt_24,
     "fewshot": fewshot_chat_prompt_24,
+    "fewshot_plan": fewshot_chat_prompt_24_plan,
 }
 
 

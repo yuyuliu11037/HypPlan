@@ -21,7 +21,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.prompt_builders import fewshot_chat_prompt_24
+from src.prompt_builders import (
+    fewshot_chat_prompt_24, fewshot_chat_prompt_24_plan,
+)
 
 
 def main():
@@ -37,6 +39,8 @@ def main():
     ap.add_argument("--max_new_tokens", type=int, default=256)
     ap.add_argument("--shard_rank", type=int, default=0)
     ap.add_argument("--shard_world", type=int, default=1)
+    ap.add_argument("--prompt_style", choices=["fewshot", "fewshot_plan"],
+                    default="fewshot")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -72,7 +76,10 @@ def main():
     t0 = time.time()
     with open(args.output, "w") as fout:
         for i, rec in enumerate(records):
-            prompt_text, add_special = fewshot_chat_prompt_24(tok, rec["problem"])
+            if args.prompt_style == "fewshot_plan":
+                prompt_text, add_special = fewshot_chat_prompt_24_plan(tok, rec["problem"])
+            else:
+                prompt_text, add_special = fewshot_chat_prompt_24(tok, rec["problem"])
             input_ids = tok.encode(
                 prompt_text, add_special_tokens=add_special,
                 return_tensors="pt",
@@ -87,8 +94,13 @@ def main():
                 )
             gen = tok.decode(out_ids[0, input_ids.size(1):],
                               skip_special_tokens=True)
-            # Re-prepend "Step 1:" (the prime) so the parser sees the full line.
-            gen_full = "Step 1:" + gen
+            # Plan prompt doesn't prime 'Step 1:' — model emits planning token
+            # then the step text autoregressively. Fewshot plain prompt does
+            # prime 'Step 1:' so we re-prepend it.
+            if args.prompt_style == "fewshot_plan":
+                gen_full = gen
+            else:
+                gen_full = "Step 1:" + gen
             fout.write(json.dumps({
                 "problem": rec["problem"],
                 "ground_truth": rec["text"],

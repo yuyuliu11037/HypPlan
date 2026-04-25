@@ -32,6 +32,21 @@ def make_completion(text: str) -> str:
     return text[idx + len(marker):]
 
 
+def make_completion_plan(text: str) -> str:
+    """Completion extractor for planning-tokens trajectories.
+
+    text starts with 'Problem: ...\n<PLAN:OP> Step 1: ...'. We want
+    everything after 'Problem: ...\\n' — i.e. starting with the first
+    <PLAN:OP> tag so the assistant's completion includes that tag.
+    """
+    marker = "\n<PLAN:"
+    idx = text.find(marker)
+    if idx == -1:
+        return text
+    # keep the leading '<PLAN:' (drop the preceding '\n')
+    return text[idx + 1:]
+
+
 class Game24SFTDataset(Dataset):
     """SFT dataset for Game of 24.
 
@@ -89,11 +104,19 @@ class Game24SFTChatDataset(Dataset):
     """
 
     def __init__(self, tokenizer, data_path: str, max_seq_len: int = 800,
-                  unique_problems: bool = True):
+                  unique_problems: bool = True,
+                  prompt_style: str = "fewshot"):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        from src.prompt_builders import fewshot_chat_prompt_24
-        self._prompt_builder = fewshot_chat_prompt_24
+        from src.prompt_builders import (
+            fewshot_chat_prompt_24, fewshot_chat_prompt_24_plan,
+        )
+        if prompt_style == "fewshot_plan":
+            self._prompt_builder = fewshot_chat_prompt_24_plan
+            self._completion_fn = make_completion_plan
+        else:
+            self._prompt_builder = fewshot_chat_prompt_24
+            self._completion_fn = make_completion
         seen = set()
         self.data = []
         with open(data_path) as f:
@@ -111,7 +134,7 @@ class Game24SFTChatDataset(Dataset):
         item = self.data[idx]
         prompt_text, prompt_add_special = self._prompt_builder(
             self.tokenizer, item["problem"])
-        completion = make_completion(item["text"])
+        completion = self._completion_fn(item["text"])
 
         prompt_ids = self.tokenizer.encode(
             prompt_text, add_special_tokens=prompt_add_special)
