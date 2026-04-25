@@ -290,7 +290,15 @@ def setup_distributed():
     else:
         device = torch.device("cpu")
     if distributed:
-        torch.distributed.init_process_group(backend="nccl", device_id=device)
+        import os as _os
+        from datetime import timedelta
+        backend = _os.environ.get("HYPPLAN_DIST_BACKEND", "gloo")
+        if backend == "nccl":
+            torch.distributed.init_process_group(backend="nccl",
+                                                   device_id=device)
+        else:
+            torch.distributed.init_process_group(backend=backend,
+                                                   timeout=timedelta(hours=8))
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
     else:

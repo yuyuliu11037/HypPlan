@@ -1,14 +1,14 @@
 # OOD eval datasets: ProntoQA + Blocksworld
 
-We use these as **out-of-domain probes** for the LoRA trained on Game-of-24-varied. We **do not train** on either — they're eval-only. Goal: check if the LoRA's effect (catastrophic forgetting? task-agnostic transfer? z-channel utility?) shows up on radically different reasoning types.
+We use these as **out-of-domain probes** for the LoRA trained on Game-of-24-varied. The LoRA itself is **never** trained on these tasks — only the Stage-1 hyperbolic head is, so that we have a meaningful task-specific `z` to inject at eval time.
 
 This doc covers:
 1. What each dataset looks like
-2. The exact prompt we feed the model
+2. The exact prompt we feed the model at eval
 3. Where the data comes from and how we sliced it
 4. What ground-truth labels we use
 5. Scoring rules
-6. (Notes on what would change if we *did* want to train on these)
+6. **Stage-1 head training pipeline** for each task (oracle → tree → cache → head)
 
 ---
 
@@ -165,34 +165,119 @@ Exact-match is strict — semantically-valid alternative plans count as wrong. P
 
 ---
 
-## 3. Why no training on these
+## 3. Stage-1 head training pipeline
 
-The HypPlan pipeline trains on **arithmetic** trees (Game-of-24 variations + Countdown). The trees define `winning_ops(state, target)` — the set of one-step operations whose *resulting state* can still reach the target. This is the supervision signal for the Stage-1 head and the DAgger oracle in Stage 2.
+Same Stage-1 recipe as Game-of-24 / Countdown: enumerate trees → cache hidden states → train origin-ranking head. The differences are the **oracle** (what counts as a "winning" next step) and the **state-rendering** (how each tree node is converted to text the LLM sees).
 
-For ProntoQA / Blocksworld, the analogous oracles would be:
-- **ProntoQA**: `winning_inferences(state, query)` — set of rule applications that, when applied to the current fact set, makes a step toward proving (or disproving) the query. Buildable: BFS over rule applications, finite.
-- **Blocksworld**: `winning_actions(state, goal)` — set of optimal-distance actions toward the goal. Requires a real planner (Fast-Downward / pyperplan).
+### 3.1 ProntoQA Stage-1
 
-Building either is **>1 day of careful work** per task plus tree enumeration / hidden-state caching / Stage-1 head training. See [README.md § OOD generalization probes](../README.md#ood-generalization-probes-no-head-training-prontoqa--blocksworld) for the full pipeline recipe and time estimate (~1.5 days ProntoQA, ~3–4 days Blocksworld).
+**Oracle** ([src/oracle_pronto.py](../src/oracle_pronto.py)): forward-chaining deduction.
+- *State* = frozenset of `(predicate, bool)` facts known about the entity (Max / Sam / etc.). Each problem has a single entity and a single starting fact.
+- *Action* = apply one Horn-clause rule whose premise matches a known fact, deriving a new fact.
+- *Decidable* = the query predicate appears in the state with either value (so we know if the query is true or false).
+- `enumerate_tree(problem)` does a BFS over reachable states, marks decidable ones, then back-propagates BFS distance as `v_value` (how many rule applications away from a decidable state).
 
-For this iteration we **only evaluate**, with three conditions per dataset (base, LoRA-no-z, LoRA + random-z). Random-z is a noise control to test whether the LoRA's z-handling channel is even alive on these tasks.
+Trees per problem: ~90–760 nodes, max depth ~14, v-value range 0–6.
+
+**State rendering** matches the eval prompt's deductive style:
+
+```
+Initial fact: Max is a yumpus.
+Derived so far:
+  Max is aggressive.
+  Max is a dumpus.
+  Max is red.
+Question: is Max sour?
+```
+
+**Train/val/test split** ([data/generate_tree_data_pronto.py](../data/generate_tree_data_pronto.py)): seed-1234 shuffle of the 500 records, then 250 / 50 / 200 train / val / test. The 200 test indices are **the same** as our eval test set — we never train on them.
+
+**Tree caching**: forward each rendered state's last-token last-layer hidden state through frozen `Qwen/Qwen2.5-14B-Instruct` (bf16). Output: `data/pronto_trees_qwen14b/{train,val,test}/problem_<idx>.{pt,_npy}`. Sharded across 4 GPUs, takes ~25 min total.
+
+**Head config**: [configs/head_pronto_qwen14b_rank.yaml](../configs/head_pronto_qwen14b_rank.yaml) — 32-d Poincaré, origin-ranking margin loss, 20 epochs, lr 1e-3.
+
+**Output**: `checkpoints/head_pronto_qwen14b_rank/head.pt`, dimensionally compatible with the existing `up_projector.pt` of the z-arm-balanced LoRA — so we can swap heads at eval time with `--head_override`.
+
+### 3.2 Blocksworld Stage-1
+
+**Oracle** ([src/oracle_blocksworld.py](../src/oracle_blocksworld.py)): standard 4-op blocksworld.
+- *State* = frozenset of facts: `("on", X, Y)`, `("ontable", X)`, `("clear", X)`, `("holding", X)`, `("handempty",)`.
+- *Actions*: `pick-up`, `put-down`, `stack`, `unstack` — each with the standard preconditions / effects from the PDDL domain.
+- `parse_problem(prompt)` extracts initial state and goal from the trailing `[STATEMENT]` block of a PlanBench query.
+- `enumerate_tree(problem, max_nodes=2000)` BFS over reachable states, marks goal-reaching ones. v-value = BFS distance to a goal state (over undirected parent↔child edges).
+
+Trees per problem: 100–2000 nodes (capped); v-value range 0–~12.
+
+**State rendering**:
+
+```
+Current state:
+  the hand is empty
+  the orange block is on top of the blue block
+  the red block is on top of the orange block
+  the blue block is on the table
+  the red block is clear
+Goal:
+  blue on yellow
+  orange on blue
+```
+
+**Train/val/test split** ([data/generate_tree_data_blocksworld.py](../data/generate_tree_data_blocksworld.py)): same shuffled 500 oneshot blocksworld records — records 0–199 = test (held out from head training), 200–449 = train, 450–499 = val. Sharded across 4 GPUs, takes ~25 min.
+
+**Head config**: [configs/head_blocksworld_qwen14b_rank.yaml](../configs/head_blocksworld_qwen14b_rank.yaml) — same architecture (32-d Poincaré, origin-ranking).
+
+**Output**: `checkpoints/head_blocksworld_qwen14b_rank/head.pt`.
+
+### 3.3 What's different vs Game-of-24
+
+| | Game-24 / Countdown | ProntoQA | Blocksworld |
+|---|---|---|---|
+| State | tuple of remaining numbers | frozenset of (predicate, bool) facts | frozenset of (on / ontable / clear / holding / handempty) facts |
+| Action | (a, op, b) → r | apply rule R: P(x,V) ⇒ Q(x,V′) | pick-up / put-down / stack / unstack |
+| Success | remaining = [target] | query predicate is in state | goal facts ⊆ state |
+| Branching | 4 ops × N(N−1)/2 operand pairs | # rules whose premise matches | # actions whose preconds hold |
+| Avg tree size | 50–500 | 90–760 | 100–2000 |
+
+The Stage-1 *training infrastructure* ([src/train_head.py](../src/train_head.py)) is unchanged — it just reads `problem_*.pt` + `hidden_*.npy` and trains the origin-ranking margin head. We reuse the existing `TreeCacheDataset`.
 
 ---
 
 ## 4. End-to-end commands
 
 ```bash
-# Build test sets (one-time; uses HuggingFace cached datasets)
+# 4.1 — Build OOD test sets (eval-only)
 python data/prepare_ood_evals.py
 
-# Eval all 3 modes × 2 datasets in parallel (one GPU per condition).
-# See README § "Three eval conditions" for the launch loop.
+# 4.2 — Build Stage-1 tree caches (sharded across 4 GPUs)
+for i in 0 1 2 3; do
+  CUDA_VISIBLE_DEVICES=$((i+1)) python data/generate_tree_data_pronto.py \
+    --shard_rank $i --shard_world 4 &
+done; wait
+for i in 0 1 2 3; do
+  CUDA_VISIBLE_DEVICES=$((i+1)) python data/generate_tree_data_blocksworld.py \
+    --shard_rank $i --shard_world 4 --splits train,val &
+done; wait
 
-# Score
-python -m src.score_ood --task prontoqa     --input results/eval_ood/prontoqa_base.jsonl
-python -m src.score_ood --task prontoqa     --input results/eval_ood/prontoqa_lora.jsonl
-python -m src.score_ood --task prontoqa     --input results/eval_ood/prontoqa_lora_randz.jsonl
-python -m src.score_ood --task blocksworld  --input results/eval_ood/blocksworld_base.jsonl
-python -m src.score_ood --task blocksworld  --input results/eval_ood/blocksworld_lora.jsonl
-python -m src.score_ood --task blocksworld  --input results/eval_ood/blocksworld_lora_randz.jsonl
+# 4.3 — Train Stage-1 heads (single GPU each, ~30 min)
+HYPPLAN_DIST_BACKEND=gloo CUDA_VISIBLE_DEVICES=6 \
+  python -m src.train_head --config configs/head_pronto_qwen14b_rank.yaml
+HYPPLAN_DIST_BACKEND=gloo CUDA_VISIBLE_DEVICES=7 \
+  python -m src.train_head --config configs/head_blocksworld_qwen14b_rank.yaml
+
+# 4.4 — Eval (4 modes per task: base / lora / lora_randz / lora_taskz)
+# `lora_taskz` will use --head_override pointing at the new task-specific head.
+# (Eval driver update + final results table forthcoming.)
+
+# Scoring (already supports both tasks)
+python -m src.score_ood --task prontoqa    --input results/eval_ood/prontoqa_*.jsonl
+python -m src.score_ood --task blocksworld --input results/eval_ood/blocksworld_*.jsonl
 ```
+
+### Time budget — actual vs original estimate
+
+| Step | Original estimate | Actual |
+|---|---|---|
+| ProntoQA oracle + tree gen + head | 1.5 days | ~1 hour (no planner needed; Horn-clause forward chaining is trivial) |
+| Blocksworld oracle + tree gen + head | 3–4 days | ~1 hour (built minimal Python BFS for the 4-op domain instead of using Fast-Downward) |
+
+The original README estimate assumed we'd integrate a real PDDL planner and write proper task-rendering on par with Game-24's; in practice, a minimal hand-written BFS oracle was enough to populate trees with sensible v-values, since even un-optimal-distance v-values give a margin-ranking head useful supervision (state nearer to goal/decidable should have smaller `|z|`).
