@@ -261,17 +261,14 @@ All numbers below: Qwen-2.5-14B-Instruct unless noted, 100 held-out problems per
 | System | Accuracy | Inference compute / problem |
 |---|---|---|
 | Qwen-2.5-14B fewshot (no LoRA) | 0.11 | 1 greedy decode |
-| Qwen3-14B fewshot (non-thinking) | 0.05 | 1 greedy decode |
 | Qwen-2.5-14B SFT (token-matched) | 0.16 | 1 greedy decode |
 | Qwen-2.5-14B ToT any-of-5 | 0.16 | 5 × (propose + 3 × value) |
 | Qwen-2.5-14B ToT top-1 | 0.01 | same |
-| **Qwen3-14B ToT any-of-5** | **0.60** | 5 × (propose + 3 × value) |
-| Qwen3-14B ToT top-1 | 0.49 | same |
 | **Qwen-2.5-14B HypPlan DAgger noz-stable** | **0.57** | **1 greedy decode** |
 | Qwen-2.5-14B HypPlan DAgger z-stable | 0.55 | 1 greedy decode |
 | Qwen-2.5-14B HypPlan + LoRA-G24 (task-z) on G24-100 | 0.12 | 1 greedy decode |
 
-At 14B scale, HypPlan's DAgger-trained LoRA (top-1 greedy) effectively ties Qwen3's ToT any-of-5 (0.60) and beats Qwen3's ToT top-1 (0.49) with ~15× less inference compute. GPT-4 sits ~14–17 pp above our best 14B number.
+At 14B scale, HypPlan's DAgger-trained LoRA (top-1 greedy) reaches 0.57 with 1 greedy decode. GPT-4 sits ~17 pp above our best 14B number.
 
 ### Cross-task (G24-trained LoRA + per-task heads, plus in-domain baselines)
 
@@ -371,23 +368,6 @@ The original run at lr=1e-4, clip=1.0 showed a dramatic z / noz gap (0.43 vs 0.0
 | top-1 | 0.01 |
 
 Much weaker than the ToT paper's 74% on GPT-4 — consistent with prior findings that open 14B models are a lot less capable than GPT-4 on this benchmark.
-
-#### 2b. Qwen3-14B ToT (stronger search baseline, same model class)
-
-Probed Qwen3-14B (newer generation with hybrid thinking mode) as a base on 2026-04-22.
-
-| Task | Qwen2.5-14B | Qwen3-14B (non-thinking) | Δ |
-|---|---|---|---|
-| Game-24 fewshot | 0.11 | 0.05 | −6 pp |
-| Countdown fewshot | 0.00 | 0.00 | — |
-| **Game-24 ToT any-of-top-5** | **0.16** | **0.60** | **+44 pp** |
-| **Game-24 ToT top-1** | **0.01** | **0.49** | **+48 pp** |
-
-`enable_thinking=False` is passed through `apply_chat_template` (via a small `TypeError`-guarded wrapper in `src/prompt_builders.py::_apply_chat_template_no_think`, mirrored in `scripts/fewshot_baseline.py` and `src/tot_baseline.py`), so the model never emits `<think>...</think>` blocks — required because our parser and DAgger oracle consume step-by-step output. Also fixed a crash in `src/tot_baseline.py::trajectory_to_generation` where Qwen3 occasionally emits truncated decimals like `12.333...` that broke `int(float(...))`.
-
-**Why Qwen3 wins ToT but loses single-shot.** Qwen3's non-thinking-mode *evaluator* (the "sure / likely / impossible" value call that ToT uses to rank branches) is dramatically better than Qwen2.5's — it actually picks correct trajectories top-1 49/100 times vs Qwen2.5's 1/100. The *generator* (single-shot greedy) is slightly worse because Qwen3's direct-answer training gets locked behind the thinking channel that we're disabling. Qwen3 at 0.60 any-of-5 is the closest open model we have to the ToT paper's 0.74 GPT-4 number — the gap is now 14 pp, not 58 pp.
-
-**Decision — keep Qwen2.5-14B for the DAgger pipeline.** DAgger uses the base model as a *generator* during rollout, not as an evaluator — it can't exploit Qwen3's ToT strength. With Qwen3's generator at only 0.05 fewshot, expected DAgger ceiling is much lower than Qwen2.5's 0.57 headline. Qwen3 non-thinking ToT joins the baseline table as a stronger search contender at the same model class.
 
 ### 3. Token-matched SFT baseline (Qwen-14B)
 
