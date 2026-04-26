@@ -1,4 +1,4 @@
-# HypPlan handoff — 2026-04-25
+# HypPlan handoff — 2026-04-25 (updated)
 
 Snapshot of the project state for picking up in a fresh conversation.
 
@@ -27,10 +27,29 @@ If true, we should see `lora + task-z > lora + no-z > base` on OOD tasks.
 | **lora + task-z (dense)** | (= 12%, same as above) | n/a (no boundaries to inject at) | 36% | 64% |
 
 PT-SFT (separate Qwen + per-task LoRA SFT'd on each task's data, planning-tokens-augmented; not directly comparable):
+- G24 **6%** (much worse than base 11%; format-correct planning tokens but arithmetic wrong)
 - PQ 52.5% (regresses below base)
 - BW 94.5% (memorization of PlanBench gold)
 - GC 64% (constraint violations frequent)
 - CD 0% strict / 58% lenient (number hallucination)
+
+Tree-of-Thoughts BFS (Qwen-2.5-14B-Instruct, custom step-by-step propose+value, 100 records each):
+| Task | Top-1 | Any-of-top-5 | vs base (top1) |
+|---|---|---|---|
+| PQ | 41% | 44% | base 60% — ToT loses (error compounding on long derivations) |
+| BW (goal) | 58% | 83% | base 41% — **+17pp top1, +42pp any-of-K, ToT clearly helps** |
+| GC | 34% | 56% | base 61% — value model fails to rank correct colorings |
+
+ToT prompts are custom (not the few-shot prompt from test records), so the comparison has prompt-format confounds. The BW result is robust enough to overcome this; PQ/GC results may partly reflect the prompt change.
+
+HypPlan Stage-1+2 trained IN-DOMAIN per task (DAgger Stage-2 LoRA+UpProjector + per-task Stage-1 head; custom step-by-step prompt; 100 records each):
+| Task | Correct | vs base | vs PT-SFT-indom |
+|---|---|---|---|
+| PQ | **75%** | 60 → +15pp | 52.5 → +22.5pp |
+| BW (goal) | **10%** | 41 → −31pp | 94.5 → −84.5pp |
+| GC | **88%** | 61 → +27pp | 64 → +24pp |
+
+PQ + GC: HypPlan Stage-1+2 in-domain clearly beats every prior arm. BW: model still mostly cycles (72/100 hit depth budget), but the cyclic-pad fix raised it from 0% → 10%. Initial sync used global-min, throwing away ~75% of the rollout pairs; replacing it with cyclic-pad-to-global-max (each rank repeats its own pairs to match the busiest rank) gives 266 train steps/epoch vs 82 before — 3.2× more supervision and the first non-zero BW solve rate. Same prompt for train + eval; for BW the gap reflects task complexity (multi-block 3D state) on a base model not pretrained for planning.
 
 ### What the table shows
 
@@ -57,6 +76,10 @@ checkpoints/
 ├── sft_pt_bw_qwen14b/lora
 ├── sft_pt_pq_qwen14b/lora
 ├── sft_pt_gc_qwen14b/lora
+├── sft_pt_24_qwen14b/lora                     # PT-SFT G24 (added 2026-04-25)
+├── dagger_stage2_pq_indomain/                 # Stage-2 in-domain PQ (added 2026-04-26)
+├── dagger_stage2_bw_indomain/                 # Stage-2 in-domain BW (added 2026-04-26)
+├── dagger_stage2_gc_indomain/                 # Stage-2 in-domain GC (added 2026-04-26)
 └── sft_gsm8k_phi15_{baseline,plan}/lora       # Phi-1.5 GSM8K reproduction (verifies PT impl)
 ```
 
@@ -80,6 +103,9 @@ results/
 ├── eval_gc_v1/                                # graph coloring 4-condition + PT-SFT
 ├── eval_pt_ood/                               # PT-SFT eval on PQ/BW/CD/GC
 ├── eval_dense_z/                              # dense per-step injection ablation (BW, GC)
+├── eval_pt_g24/                               # PT-SFT G24 eval (2026-04-25)
+├── tot_ood/{pq,bw,gc}/                        # ToT BFS on the 3 OOD tasks (2026-04-25)
+├── eval_stage2_indomain/{pq,bw,gc}/           # HypPlan Stage-1+2 in-domain (2026-04-26)
 └── eval_gsm8k_phi15/{baseline,plan}/          # Phi-1.5 GSM8K reproduction
 ```
 
@@ -99,6 +125,13 @@ results/
 - [src/eval_ood_generic.py](../src/eval_ood_generic.py) — single-shot z (used for v2 results)
 - [src/eval_dense_z.py](../src/eval_dense_z.py) — **dense per-step z** ablation (new); supports tasks g24/gc/bw, modes single/dense
 - [src/eval_pt_ood.py](../src/eval_pt_ood.py) — PT-SFT inference on OOD tasks
+- [src/eval_pt_g24.py](../src/eval_pt_g24.py) — PT-SFT inference on G24 (2026-04-25)
+- [src/tot_ood.py](../src/tot_ood.py) — generic ToT BFS for PQ/BW/GC (2026-04-25)
+- [src/dagger_ood_adapters.py](../src/dagger_ood_adapters.py) — per-task adapter (2026-04-26)
+- [src/dagger_rollout_ood.py](../src/dagger_rollout_ood.py) — generic OOD rollout (2026-04-26)
+- [src/train_stage2_dagger_ood.py](../src/train_stage2_dagger_ood.py) — generic OOD Stage-2 trainer (2026-04-26)
+- [src/eval_stage2_indomain.py](../src/eval_stage2_indomain.py) — Stage-2 in-domain eval (2026-04-26)
+- `configs/stage2_dagger_{pq,bw,gc}_qwen14b.yaml` (2026-04-26)
 - [src/eval_gsm8k.py](../src/eval_gsm8k.py) — Phi-1.5 GSM8K eval
 - [src/score_ood.py](../src/score_ood.py) — scorers including BW exact-match + goal-reaching simulator, GC validity, PQ letter-match
 - [src/generate_24_varied.py](../src/generate_24_varied.py) — G24-100 in-domain eval (uses dense rollout_one)
@@ -109,7 +142,7 @@ results/
 - [src/train_sft_24_qwen.py](../src/train_sft_24_qwen.py) — Qwen2.5-14B SFT (gloo DDP)
 - [src/train_sft_gsm8k.py](../src/train_sft_gsm8k.py) — Phi-1.5 SFT for the planning-tokens reproduction
 
-**Configs**: `configs/head_*_qwen14b_rank.yaml`, `configs/stage2_dagger_24_varied_balanced.yaml`, `configs/sft_pt_*.yaml`, `configs/sft_gsm8k_phi15_*.yaml`
+**Configs**: `configs/head_*_qwen14b_rank.yaml`, `configs/stage2_dagger_24_varied_balanced.yaml`, `configs/sft_pt_*.yaml` (incl. `sft_pt_24_qwen14b.yaml`), `configs/sft_gsm8k_phi15_*.yaml`
 
 **Docs**: [docs/ood_datasets.md](ood_datasets.md), [README.md](../README.md)
 

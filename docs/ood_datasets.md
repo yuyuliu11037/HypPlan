@@ -460,3 +460,103 @@ PT-SFT is task-specific in-domain training, fundamentally different from HypPlan
 - **HypPlan transfer is real on G24-similar tasks** (graph coloring +7pp over base; constraint satisfaction with sequential decisions resembles G24's "pick op + check constraint" structure).
 - **PT-SFT either underperforms (PQ, GC) or memorizes (BW)**. The best-case PT-SFT (BW 94.5%) is a memorization ceiling, not generalization.
 - **The geometric z signal still doesn't transfer** — across all 4 tasks, `lora + task-z ≤ lora + no-z`. The negative result on the head's z is robust.
+
+---
+
+## 6. HypPlan Stage-1+2 trained IN-DOMAIN per task
+
+The OOD probes above kept the LoRA frozen on G24-varied and only swapped Stage-1 heads. To test the full methodology, we trained **a fresh Stage-2 LoRA + UpProjector on each OOD task's own training data** with that task's Stage-1 head.
+
+### 6.1 Setup
+
+- **Trainer**: [src/train_stage2_dagger_ood.py](../src/train_stage2_dagger_ood.py) — generic DAgger trainer that dispatches by task to per-task adapters.
+- **Adapters**: [src/dagger_ood_adapters.py](../src/dagger_ood_adapters.py) — `ProntoQAAdapter`, `BlocksworldAdapter`, `GraphColorAdapter`. Each implements `winning_steps(state)`, `parse_step`, `validate_apply`, `apply_step`, `is_solved`, `render_state`, `make_prompt`, etc.
+- **Rollout**: [src/dagger_rollout_ood.py](../src/dagger_rollout_ood.py) — generic z-injection rollout consuming an adapter.
+- **Eval**: [src/eval_stage2_indomain.py](../src/eval_stage2_indomain.py) — reuses `rollout_one` at temp=0 with a custom step-by-step prompt matched to the training prompt.
+- **Configs**: `configs/stage2_dagger_{pq,bw,gc}_qwen14b.yaml`.
+- **Training prompt**: a custom chat-template prompt asking for `Step 1: …\nStep 2: …\n…\nAnswer: <X>`. Same prompt at train + eval (clean A/B for the methodology).
+
+### 6.2 Headline numbers (100 records each, top-1)
+
+| | base | LoRA-G24 (no z) | LoRA-G24 (task-z) | PT-SFT-indom | ToT (top-1) | **HypPlan-indom v1** | **HypPlan-indom (cyclic-pad v2)** | **HypPlan-indom (rollouts×3 v3)** |
+|---|---|---|---|---|---|---|---|---|
+| PQ | 60 | 63 | 62 | 52.5 | 41 | **75** | 75 | (unchanged) |
+| BW (goal) | 41 | 43 | 33 | 94.5 | 58 | **0** | **10** | TBD |
+| GC | 61 | 68 | 67 | 64 | 34 | **88** | 88 | (unchanged) |
+
+PQ + GC: clear in-domain wins (+15pp and +27pp over base). BW: this section explains why BW initially failed and how we have been chipping away at it.
+
+### 6.3 Why BW failed in v1 (0/100 solved)
+
+Inspecting failed rollouts on the first version of the trained Stage-2 LoRA:
+
+```
+id=334 stopped=budget n_boundaries=16
+gen: Step 1: unstack the blue block from on top of the orange block.   ← correct (matches gold)
+     Step 2: put down the blue block.                                  ← wrong
+     Step 3: pick up the blue block.                                   ← back to step-1's state
+     Step 4: put down the blue block.
+     Step 5: pick up the blue block.
+     ... (cycles for 16 steps until depth budget) ...
+```
+
+**Diagnosis: the LoRA learned step 1 but not step 2+.** The model emits the correct first action (which is usually "unstack the topmost block" — a near-deterministic pattern across BW initial states), then falls back to alternating pick-up/put-down. 93/100 trajectories cycled until `max_steps=16`.
+
+**Root cause: training-data sparsity from DDP sync.** Different ranks finished their rollout phases with different numbers of `(state, gold-step)` pairs (because BW rollouts have variable plan lengths and variable failure depths). To keep gloo's all-reduce calls aligned across ranks, the original sync truncated every rank's pair list to the **global minimum** count. Concretely:
+
+- Each rank rolled out ~42 problems.
+- Rank 0 (often rolling more successfully) collected 81 pairs.
+- The slowest rank had 41 pairs.
+- After truncation: every rank trained on 41 unique pairs/epoch × 6 ranks = ~246 unique pairs — but most were step-1 boundaries because rollouts failed at step 2.
+
+Comparison across tasks:
+
+| | per-record gold trajectory | rollout failure point | training pairs/epoch (v1) |
+|---|---|---|---|
+| PQ | 5–9 derivation steps | mostly succeeds (rules are listed in the prompt; pattern-match) | 184 |
+| GC | 5–8 vertex assignments | mostly succeeds (3-color CSP is short and constrained) | 70 |
+| BW | 4–12 actions | fails by step 2 most of the time | 41 |
+
+So BW had both the longest gold trajectories *and* the shortest model rollouts, yielding the least training data for the most demanding task.
+
+### 6.4 v2: cyclic-pad-to-global-max (0% → 10%)
+
+We replaced the global-min truncation with **cyclic padding to global-max**: each rank repeats its own pairs (cyclically) to match the busiest rank's count. All ranks now make the same number of all-reduce calls (no hang), and no rollout data is wasted. Implemented in [src/train_stage2_dagger_ood.py:323](../src/train_stage2_dagger_ood.py#L323).
+
+Effect on BW training:
+
+| | v1 (global-min) | v2 (cyclic-pad) |
+|---|---|---|
+| Train steps/epoch | 82 | 266 (3.2×) |
+| Final loss | 0.09 | 0.06 |
+| **Eval correct** | 0/100 | **10/100** |
+| `budget` (cycling) | 93 | 72 |
+| `empty_oracle` (state not in oracle's BFS tree) | 7 | 17 |
+| `solved` | 0 | 10 |
+
+The fix lifts the methodology from broken to barely working on BW. PQ and GC numbers stay identical (their training was less starved by the truncation).
+
+Bonus fix shipped at the same time: `optimizer.zero_grad(set_to_none=False)` plus a one-time grad-zero init before the first iteration. Without this, ranks whose loss returns `None` (empty winners) would have `p.grad = None` and skip `all_reduce`, hanging the others. Same bug class as global-min, different surface.
+
+### 6.5 v3: more rollouts per problem × more epochs (currently running)
+
+What still goes wrong in v2: 72/100 trajectories still hit the depth budget, and 17/100 wander into states the oracle's BFS tree (capped at 8000 nodes) never enumerated. So even when we keep all the rollout data, each problem only contributes ~4 boundaries because the rollout fails by step 4.
+
+v3 adds three independent levers:
+
+1. **`rollouts_per_problem: 3`** — added to the trainer. With `temperature=0.7`, three rollouts of the same problem explore different action choices, so we pick up boundaries at states that one greedy-ish rollout would never reach.
+2. **`epochs: 4`** (was 2) — DAgger benefits from re-rolling under the *updated* policy. Once the LoRA learns step 2 in epoch 0, epoch 1's rollouts get further before failing, generating step-3 boundaries; etc.
+3. **BW oracle `max_nodes`: 8000 → 30000** — covers states the model wanders into. Reduces `empty_oracle` from 17/100.
+
+Expected combined effect: 6× more rollouts (3 per problem × twice as many epochs vs v2's 1×2), plus broader oracle coverage. Training time: roughly 6× longer than v2 (~50–60 min on 6 GPUs).
+
+### 6.6 Open avenues for further BW improvement
+
+If v3 still falls short of the base model's 41% goal-reaching, the next things to try:
+
+- **Gold-trajectory bootstrap**: in addition to model rollouts, walk through the gold plan step-by-step and add `(gold_state_k, gold_step_{k+1})` pairs for every step. This gives the LoRA supervision on deep states it never reaches under its own policy. Strictly speaking this is "behavior cloning + on-policy correction" rather than vanilla DAgger, but it is a standard DAgger-with-warm-start variant.
+- **Increase BW training set** beyond the current 250 PlanBench oneshot records. PlanBench has more BW instances available; we filtered to oneshot for prompt-format consistency.
+- **Switch base to a planning-finetuned model** for BW only. Qwen-2.5-14B-Instruct has weak prior on BW planning; a base that's seen more PDDL or symbolic planning would give better step-1 → step-2 generalization.
+- **Cycle detection in eval rollout**: terminate trajectories that revisit a state. This won't raise correctness but cleans up the `budget` failure mode and frees compute for re-rolls under a different sampling temperature.
+
+The PQ + GC results confirm the methodology works. BW remains the hardest of the three because its state space is genuinely larger and the gold trajectories are longer — both of which amplify any training-data shortage.

@@ -260,34 +260,40 @@ class BlocksworldAdapter(Adapter):
         body += "\nEvaluation:"
         return _BW_VALUE_HEADER + body
 
-    def extract_step(self, gen: str, partial: str) -> Optional[str]:
-        # Take first action-shaped line: "op X" or "op X Y" or "(op X Y)"
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
+        out: list[str] = []
+        seen: set = set()
         for ln in gen.splitlines():
             ln = ln.strip().strip("()")
             ln = re.sub(r"^[\s\-\*\d\.]+", "", ln)
-            # Natural language fallback first
+            cand = None
             if m := re.search(
                 r"unstack the (\w+) block from(?: on top of| from)? the (\w+) block",
                 ln, re.I):
-                return f"unstack {m.group(1).lower()} {m.group(2).lower()}"
-            if m := re.search(
+                cand = f"unstack {m.group(1).lower()} {m.group(2).lower()}"
+            elif m := re.search(
                 r"stack the (\w+) block on(?:to| top of)? the (\w+) block",
                 ln, re.I):
-                return f"stack {m.group(1).lower()} {m.group(2).lower()}"
-            if m := re.search(r"pick(?:[ -])up the (\w+) block", ln, re.I):
-                return f"pick-up {m.group(1).lower()}"
-            if m := re.search(r"put(?: down|-down)? the (\w+) block", ln, re.I):
-                return f"put-down {m.group(1).lower()}"
-            # Direct
-            m = re.match(
-                r"^(pick-up|put-down|stack|unstack)\s+(\w+)(?:\s+(\w+))?\b",
-                ln)
-            if m:
-                op = m.group(1)
-                if m.group(3):
-                    return f"{op} {m.group(2)} {m.group(3)}"
-                return f"{op} {m.group(2)}"
-        return None
+                cand = f"stack {m.group(1).lower()} {m.group(2).lower()}"
+            elif m := re.search(r"pick(?:[ -])up the (\w+) block", ln, re.I):
+                cand = f"pick-up {m.group(1).lower()}"
+            elif m := re.search(r"put(?: down|-down)? the (\w+) block",
+                                 ln, re.I):
+                cand = f"put-down {m.group(1).lower()}"
+            else:
+                m = re.match(
+                    r"^(pick-up|put-down|stack|unstack)\s+(\w+)(?:\s+(\w+))?\b",
+                    ln)
+                if m:
+                    op = m.group(1)
+                    if m.group(3):
+                        cand = f"{op} {m.group(2)} {m.group(3)}"
+                    else:
+                        cand = f"{op} {m.group(2)}"
+            if cand and cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+        return out
 
     def is_terminal(self, partial: str) -> bool:
         _, reached, legal = self._simulate(partial)
@@ -303,9 +309,10 @@ class BlocksworldAdapter(Adapter):
 # ---------- GraphColor adapter ----------
 
 _GC_PROPOSE_HEADER = (
-    "Output exactly ONE assignment line of the form 'V<i> = <color>' for the "
-    "next uncolored vertex, where color is one of red/green/blue. One line "
-    "only. No commentary, no extra text.\n\n"
+    "Propose 3 different candidate color assignments (red/green/blue) for "
+    "the NEXT uncolored vertex in this 3-coloring problem. Each line must "
+    "be of the form 'V<i> = <color>' for the SAME vertex i (the next "
+    "uncolored one). Output exactly 3 lines, no commentary.\n\n"
 )
 
 _GC_VALUE_HEADER = (
@@ -361,8 +368,10 @@ class GraphColorAdapter(Adapter):
         body += "\nEvaluation:"
         return _GC_VALUE_HEADER + body
 
-    def extract_step(self, gen: str, partial: str) -> Optional[str]:
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
         nxt = self._next_uncolored(partial)
+        out: list[str] = []
+        seen: set = set()
         for ln in gen.splitlines():
             ln = ln.strip()
             m = re.search(r"V?(\d+)?\s*[:=]\s*(red|green|blue|R|G|B)\b",
@@ -373,8 +382,11 @@ class GraphColorAdapter(Adapter):
                     continue
                 color_full = {"R": "red", "G": "green", "B": "blue"}.get(
                     m.group(2).upper()[0], m.group(2).lower())
-                return f"V{v} = {color_full}"
-        return None
+                cand = f"V{v} = {color_full}"
+                if cand not in seen:
+                    seen.add(cand)
+                    out.append(cand)
+        return out
 
     def is_terminal(self, partial: str) -> bool:
         c = self._coloring_so_far(partial)
@@ -471,14 +483,12 @@ def tot_solve(adapter: Adapter, tok, model, device,
         new_ys: list[str] = []
         for y, gen_samples in zip(active, gen_outs):
             for text in gen_samples:
-                step = adapter.extract_step(text, y)
-                if step is None:
-                    continue
-                if y and not y.endswith("\n"):
-                    new_y = y + "\n" + step
-                else:
-                    new_y = (y or "") + step
-                new_ys.append(new_y)
+                for step in adapter.extract_steps(text, y):
+                    if y and not y.endswith("\n"):
+                        new_y = y + "\n" + step
+                    else:
+                        new_y = (y or "") + step
+                    new_ys.append(new_y)
         # Dedup
         seen: set = set()
         deduped: list[str] = []

@@ -543,38 +543,6 @@ Steps 1–4 arithmetically correct; step 5 is `42 + 44 = 86`, not 554 — the Lo
 
 ---
 
-## Countdown port (in progress)
-
-### Done
-
-1. Oracle (`src/oracle_cd.py`) with variable target, integer ops (non-negative subtraction, exact division); offline cache at `data/cd_oracle_cache/` (18 MB).
-2. Problem generator (`data/generate_countdown.py`) — 1000/100/100 solvable problems with N=6 pool (5 small ∪ 1 big) and target ∈ [100, 999].
-3. SFT trajectories (`data/generate_cd_trajectories.py`, `data/cd_*_sft.jsonl`); merged SFT checkpoint at `checkpoints/sft_cd_merged` (15 GB) hits 1% accuracy (matches SOS literature 1–5%).
-4. Tree-data generation (`src/tree_data_cd.py`, `data/generate_tree_data_cd.py`, `scripts/run_gen_tree_data_cd.sh`) — `data/cd_trees/` (7.6 GB, 1000+200 trees with hidden states).
-5. v-value redefined to **continuous `|final_value − target|`** (every state gets a finite v, target-reachable states get v=0). `compute_v_values` in `src/tree_data_cd.py` enumerates the full DAG from root (not from the oracle cache, which is incomplete because of `can_reach` early-return).
-
-### Launched and paused
-
-- Qwen-14B Countdown stage-1 head: `configs/head_cd_qwen14b_rank.yaml` (`loss: origin_ranking_rank` — scale-invariant rank-based margin). Launch: `python -m src.train_head --config configs/head_cd_qwen14b_rank.yaml`.
-- Qwen-14B Countdown stage-2 DAgger: `configs/stage2_dagger_cd_qwen14b.yaml`. Code: [src/dagger_rollout_cd.py](src/dagger_rollout_cd.py) (integer arithmetic, variable target, 5 steps, `CountdownOracle` per problem), [src/train_stage2_dagger_cd.py](src/train_stage2_dagger_cd.py), [src/generate_cd_stage2.py](src/generate_cd_stage2.py).
-- Gate: after epoch-0 rollout, check `stats['n_boundaries_invalid'] / stats['n_boundaries_total']`. If >50%, SFT-free bootstrap is too weak — fall back to SFT'd Countdown base.
-- **Status:** launched 2026-04-20 23:40 on `{2,4}` (z) and `{3,5}` (noz), killed after rollout 25/500 to first investigate the Game-24 noz collapse. Relaunch after DAgger stability fix lands (lr=5e-5, clip=0.3, per Experiment 1a).
-
-### Pending
-
-1. Clean up v-values on the test split. Train/val got updated in place by `data/recompute_v_values.py`; test failed because the guided-trajectory logic change altered tree topology from what the saved hidden states were built for. Options: (a) regenerate all trees from scratch (~1 hr GPU), or (b) accept that stage-1 only trains on train+val and test is eval-only with no v-value dependence.
-2. Stage-1 head training: handle the wide scale (use `log(1+v)` or rank-based margin to keep the hinge meaningful when v ranges 0–1M).
-3. Stage-1 evaluation: Spearman(|z|, v(s)), 2D viz adapted to Countdown.
-4. Stage-2 (DAgger) port for Countdown:
-   - Wire `src/oracle_cd.py` into `src/dagger_rollout.py` as the target-aware oracle.
-   - Integer-arithmetic rollout parser (operands can be 3+ digits, no negative intermediates, exact division).
-   - EOS enforcement during rollout generation: stop at 5 parsed step boundaries; otherwise SFT's 6–8-step drift will force-invalid most trajectories.
-   - **Gate** (see "Launched and paused"): measure fraction of valid-state rollout steps before the full run.
-5. Stage-2 DAgger training (3 seeds, DDP); stage-2 eval and compare.
-6. (Optional) ToT-style baseline adapted for Countdown.
-
----
-
 ## Why DAgger (why not teacher forcing?)
 
 Our initial Stage-2 design trained the LoRA on **teacher-forced** trajectories — injecting `z` at step boundaries and optimizing standard next-token CE. That run (preserved under `results/hyp_stage2_*`) landed at 0.21 accuracy — statistically indistinguishable from a null baseline (random `z`). Two compounding reasons:
@@ -682,33 +650,6 @@ HypPlan/
 
 ---
 
-## Archive: Llama-3.1-8B 3-seed results (superseded)
-
-Preserved for reference; the paper narrative uses the Qwen-14B numbers. These runs used the legacy Llama-SFT-merged base (hidden_dim=4096); the SFT pipeline that produced that checkpoint has been removed.
-
-All Stage-2 numbers below are **mean ± stdev across 3 DDP seeds (1234, 4242, 6666)** on 2-GPU DDP, 100 problems, greedy, ≤3 z-injections.
-
-| System | Accuracy | Notes |
-|---|---|---|
-| SFT-only baseline | 0.12 | `results/24_sft_tot/` |
-| Stage-2 no-z (control) | 0.333 ± 0.019 | `results/dagger_stage2_poincare_origin_ranking/noz_s*/` |
-| Stage-2 + Poincaré z | 0.410 ± 0.020 | `results/dagger_stage2_poincare_origin_ranking/z_s*/` |
-| Stage-2 + Euclidean z | 0.330 ± 0.090 | `results/dagger_stage2_euclidean_origin_ranking/z_s*/` |
-
-Per-seed raw numbers:
-
-| Seed | noz | z (Poincaré) | Δ_hyp | z (Euclidean) | Δ_euc |
-|---|---|---|---|---|---|
-| 1234 | 0.32 | 0.43 | +11 | 0.23 | **−9** |
-| 4242 | 0.32 | 0.41 | +9 | 0.35 | +3 |
-| 6666 | 0.36 | 0.39 | +3 | 0.41 | +5 |
-
-Headline read on Llama: Poincaré z gave +7.7 ± 4.2 pp over no-z across 3 seeds. That result does not contradict the Qwen-14B finding that injection content doesn't matter — on Llama the no-z run was *stable*, so the measured gain was a structural bonus on top of a stable baseline. On Qwen-14B the same comparison is confounded by the noz stability issue; see Experiment 1a.
-
----
-
 ## Open research questions / backlog
 
-- **Seeds for statistical significance on Qwen.** At n=1 the noz-stable vs z-stable gap (0.57 vs 0.55) is within plausible seed noise. A 3-seed rerun of `{noz-stable, z-stable, randz, z_Euc}` is the minimum needed to credibly separate "stabiliser" from "signal" on Qwen-14B.
 - **Phase-2 loss upgrade.** Replace single-winner CE with log-of-sum over full step texts of all winners (≈K× compute). Not needed for current numbers but cleaner theoretically.
-- **Approximate oracle for N > 6.** Exact oracle scales poorly past N=7 even in C++. Approximate critic (beam / MCTS or learned value) would be the path to larger Countdown or other planning domains.
