@@ -116,124 +116,36 @@ To probe whether the G24-trained LoRA transfers to OOD tasks, we run three test 
 
 (We previously also ran Countdown but the result there was uniformly 0% across conditions, dominated by exact-match scoring artifacts. We replaced it with Graph Coloring to get a more discriminating probe.)
 
-### Why no head?
+### Eval conditions
 
-These tasks aren't arithmetic — there's no `winning_ops`-style oracle, and `rollout_one`'s step-boundary detection (`Step N: a op b = r`) doesn't fire. Building proper Stage-1 heads for them would require ~3–5 days each (oracle + tree enumeration + hidden-state cache + head training); see "Constructing the full pipeline" below for the recipe.
+For each dataset we run four conditions, all sharing the same Stage-2 LoRA checkpoint trained on G24-varied (`checkpoints/dagger_stage2_24_varied_bal_r4/z_s1234`):
 
-### Three eval conditions
+| Condition | LoRA | z injection |
+|---|---|---|
+| **base** | off | none |
+| **lora-no-z** | on | none |
+| **lora-rand-z** | on | one Gaussian (norm = √hidden) at start |
+| **lora-task-z** | on | per-task Stage-1 head's z, single-shot at start |
 
-For each dataset we run three conditions, all using the LoRA-trained checkpoint `checkpoints/dagger_stage2_24_varied_bal_r4/z_s1234`:
+Per-task Stage-1 heads (one per task; LoRA stays the same): `checkpoints/head_{pronto,blocksworld,graphcolor}_qwen14b_rank/head.pt`. Built per the recipe in [docs/ood_datasets.md § 3](docs/ood_datasets.md). Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_ood.py](src/score_ood.py); data prep: [data/prepare_ood_evals.py](data/prepare_ood_evals.py).
 
-| Condition | LoRA | z injection | Tests |
-|---|---|---|---|
-| **base** | off | none | reference: base Qwen2.5-14B fewshot |
-| **lora** | on | none | does our LoRA hurt unrelated reasoning? |
-| **lora-randz** | on | one random Gaussian (norm = √hidden) injected once at start of generation | does the LoRA "z-handling" survive on radically different tasks, or is it just noise? |
+### Results
 
-We **don't** test `lora + meaningful z` because we'd need a task-specific head to compute one.
+The full numbers (4-condition × 4-task plus PT-SFT, ToT, and Stage-1+2 in-domain) live in the **Headline results** section above. This section explains what the numbers mean.
 
-Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_ood.py](src/score_ood.py); data prep: [data/prepare_ood_evals.py](data/prepare_ood_evals.py).
+**Z transfers in-domain, not OOD.** `LoRA-G24 (task-z) > LoRA-G24 (no-z)` only on G24-100 (+3 pp). On PQ/BW/GC, task-z ≤ no-z regardless of injection density. We tested this directly with dense per-step injection on BW + GC: the gap doesn't close (BW 33→36, GC 67→64; see [src/eval_dense_z.py](src/eval_dense_z.py)). Task-structure mismatch, not injection sparsity, is the bottleneck.
 
-### Results (2026-04-25, 100 records each)
+**The LoRA itself transfers on G24-similar tasks** even without z: GC +7 pp over base (constraint satisfaction with sequential decisions resembles G24's "pick op + check constraint" loop), PQ +3 pp (deductive logic), BW neutral.
 
-#### v1 — eval-only (no task-specific head)
+**Random z is universally harmful.** On every task, `LoRA-G24 + rand-z` is the worst row. The z channel is *active* — uninformed perturbations matter — but uninformed-z degrades output (e.g., on PQ random-z makes the model abandon the "reply with one letter" rule and start free-form explaining; on BW random-z drops 7/100 plans to zero actions).
 
-| Dataset | base | lora (no z) | lora + rand-z |
-|---|---|---|---|
-| **ProntoQA** | **54%** | 53% | **37%** |
-| **Blocksworld** (exact-match) | 1% | 0% | 2% |
-
-(Test indices were records 3-202; results in [results/eval_ood/](results/eval_ood/).)
-
-#### v2 — with task-specific Stage-1 heads ([docs/ood_datasets.md § 3](docs/ood_datasets.md))
-
-ProntoQA head: `checkpoints/head_pronto_qwen14b_rank/head.pt`. Blocksworld head: `checkpoints/head_blocksworld_qwen14b_rank/head.pt`. Test indices realigned to records 300-499 (ProntoQA) / 0-199 (Blocksworld) so the head's training set is held out.
-
-| Dataset | base | lora (no z) | lora + rand-z | **lora + task-z** |
-|---|---|---|---|---|
-| **G24-100 (in-domain)** | 11% | 9% | 4% | **12%** ✅ |
-| **ProntoQA** | 60% | **63%** | 43% | 62% |
-| **Blocksworld** (goal-reaching) | 41% | **43%** | 35% | 33% |
-| **Graph Coloring** | 61% | **68%** | 60% | 67% |
-| Blocksworld (exact-match — under-estimate) | 1% | 0% | 2% | 2% |
-| Blocksworld (avg actions / zero-action) | 9.0 / 0 | 8.8 / 0 | 6.1 / 7 | 5.9 / 15 |
-
-**Note on injection regime**: For G24, `task-z` uses *dense per-step-boundary* z injection via [src/dagger_rollout_varied.py](src/dagger_rollout_varied.py)'s `rollout_one` (matches DAgger training). For OOD probes (PQ/BW/GC), the originally reported `task-z` numbers used **single-shot** injection (one z at start of generation) because OOD outputs lack G24-style step markers. To rule out density as the OOD failure mechanism, we re-ran BW and GC with *dense state-aware* injection (per-line, with state-updates after each emitted step):
-
-| Task | lora-noz | task-z single | **task-z dense** | Δ dense vs single |
-|---|---|---|---|---|
-| BW (goal-reaching) | 43% | 33% | **36%** | +3pp |
-| GC | 68% | 67% | **64%** | -3pp |
-
-Dense doesn't bridge the gap. **Even with the same per-step injection that works in-domain, the LoRA still fails to use task-z on OOD tasks.** The OOD-failure mechanism is task-structure mismatch, not injection sparsity. Driver: [src/eval_dense_z.py](src/eval_dense_z.py).
-
-(Results in [results/eval_ood_v2/](results/eval_ood_v2/). Goal-reaching = simulate the model's plan from initial state and check if `goal_facts ⊆ final_state`; matches PlanBench's spirit. Exact-match is strict string equality with gold plan and **drastically under-estimates** correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).)
-
-#### What the full table reveals
-
-1. **Z works on the training distribution (G24)** — lora_taskz beats lora-no-z by +3pp (12 vs 9) and beats base by +1pp (12 vs 11). This is where the LoRA was trained to read z at every step boundary, so single-shot z eval still earns its keep.
-2. **Z does NOT transfer to OOD** — on PQ/BW/GC, lora_taskz never beats lora-no-z. The injection regime (z once at start of generation) is too sparse for tasks lacking G24's step-boundary structure.
-3. **But the LoRA itself transfers usefully on tasks structurally similar to G24.** On Graph Coloring (constraint satisfaction with sequential decisions, like G24's "pick op + check constraint"), G24-LoRA-no-z gives **+7pp over base** (61→68). On ProntoQA (deductive reasoning), modest +3pp. On Blocksworld (long-horizon planning), neutral (+2pp).
-4. **Random z is the worst condition on every task** — most extreme on ProntoQA (-20pp from no-z) and G24 (-5pp from no-z). The z channel is "active" (perturbations matter) but uninformed-z is universally harmful.
-
-#### Bottom line
-
-The hypothesis splits into two pieces:
-
-- **"z helps in-domain" — confirmed.** On G24-100 (training distribution), lora_taskz = 12% beats both base (11%) and lora-no-z (9%). The geometric channel does its job *at training-time injection density*.
-- **"z transfers to OOD tasks" — not supported.** On PQ/BW/GC, lora_taskz ≤ lora-no-z. Single-shot z at start of generation is too sparse for tasks without G24-style step boundaries.
-- **"the LoRA's task generalization itself" — partially supported.** G24-LoRA SFT transfers most cleanly to constraint-satisfaction-style reasoning (graph coloring +7pp), modestly to deductive logic (PQ +3pp), neutral on long-horizon planning (BW +2pp). The pattern tracks structural similarity to G24's "pick step + check constraint" loop.
-
-Followups tried:
-- ✅ **Dense per-step-boundary z injection** on OOD (BW, GC): doesn't bridge the gap (BW 33→36, GC 67→64). Density isn't the bottleneck — task-structure mismatch is.
+**Pipelines reproduced.** v1 of these experiments evaluated only `base` / `LoRA-no-z` / `LoRA-rand-z` (no task-specific Stage-1 heads); raw outputs in [results/eval_ood/](results/eval_ood/). v2 added per-task Stage-1 heads (`checkpoints/head_{pronto,blocksworld,graphcolor}_qwen14b_rank/head.pt`) so we have meaningful task-z; outputs in [results/eval_ood_v2/](results/eval_ood_v2/). Goal-reaching scoring (the meaningful BW metric — simulate the model's plan from initial state, check if `goal_facts ⊆ final_state`) is in [src/score_ood.py](src/score_ood.py); the strict exact-match metric drastically under-estimates BW correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).
 
 Followups still open:
-- Train the LoRA on a *mixture* of arithmetic + deductive / planning tasks — so the LoRA actually learns to read z across task types
-- Use a larger Stage-1 head (more capacity to distinguish OOD states)
+- Train the LoRA on a *mixture* of arithmetic + deductive / planning tasks so it actually learns to read z across task types.
+- Use a larger Stage-1 head (more capacity to distinguish OOD states).
 
-#### ProntoQA findings
-
-1. **LoRA alone is essentially neutral** (54 → 53, within noise). The varied-target G24 LoRA did **not** catastrophically forget logical reasoning.
-2. **Random z hurts dramatically** (-17pp). The LoRA's z-injection channel is *active* — random noise injected as a virtual token corrupts instruction-following: the model abandons the "reply with one letter" rule and starts explaining its reasoning ("Based on the provided context, Alex is a numpus, …"), often missing the format check even when the content would have been correct.
-3. **Implication**: a meaningful task-specific z (from a ProntoQA-trained Stage-1 head) might *help* via the same channel that random z hurts. Untested without the head.
-
-#### Blocksworld findings
-
-PlanBench's gold uses canonical PDDL format `(unstack blue orange)`; the in-context example in the prompt uses natural-language form ("unstack the blue block from on top of the orange block"). The model copies the in-context style → emits natural-language plans. Our scorer normalises both forms to PDDL before exact-match.
-
-1. **All three conditions ~0% on exact-match**. Qwen2.5-14B fewshot can't solve PlanBench Blocksworld out of the box (consistent with PlanBench paper: GPT-3.5/Llama-2 also struggle here without fine-tuning or external planner help).
-2. **Plan length distribution**: base 9.0 actions, lora 8.8, lora_randz 6.1 vs gold 7.7. LoRA preserves plan-generation behaviour (similar length); rand-z degrades it (7/100 produce zero actions because the noise breaks output).
-3. **Caveat**: exact-match is strict — semantically-valid alternative plans count as wrong. PlanBench's full evaluator runs Fast-Downward to verify plans reach the goal, which we don't. So 0% is an *under-estimate* of correctness; the *trend* (LoRA-no-z ≈ base, rand-z degrades output structure) is the meaningful signal.
-
-#### Takeaway
-
-The LoRA's effect on non-arithmetic reasoning is consistent with the "task-specific transfer" picture:
-- Doesn't catastrophically forget (LoRA-no-z ≈ base on both tasks)
-- Z-channel is alive (rand-z noticeably degrades both tasks)
-- Without a meaningful task-specific z, the channel just adds noise — supports the hypothesis that *task-matched* z signal would matter
-
-### Constructing the full pipeline (with task-specific heads)
-
-For a *proper* OOD test of the "LoRA uses meaningful z" hypothesis on ProntoQA / Blocksworld, you'd need a task-specific Stage-1 head. The same recipe used for Countdown:
-
-1. **Define the oracle.** ProntoQA: `winning_inferences(state, query) → set of valid one-step rule applications`. Blocksworld: `winning_actions(state, goal) → set of optimal/admissible next moves`. Need a planner (e.g. fast-downward) for ground truth on Blocksworld; ProntoQA's deductive structure is smaller so brute-force BFS works.
-2. **Enumerate trees.** Build per-problem state trees with depth gap to a success leaf as the v-value.
-3. **Cache hidden states.** Forward each rendered state text through the frozen base model; save last-token hidden state as float16 memmap.
-4. **Train head.** Same Stage-1 origin-ranking script, just point to the new tree dir and state-rendering function.
-5. **Eval.** Run `eval_ood_generic.py` with `--mode lora_z --head_override checkpoints/head_<task>/head.pt`.
-
-### Time estimate per task
-
-| Step | ProntoQA | Blocksworld |
-|---|---|---|
-| Oracle + state representation | 1 day | 2 days (need PDDL planner) |
-| Tree enumeration on 1090 problems | 30 min | 4–8 hr (planner is slow on ≥6-block instances) |
-| Hidden-state caching (Qwen2.5-14B forward) | 1 hr (4 GPUs) | 1.5 hr (4 GPUs) |
-| Stage-1 head training | 30 min (4 GPUs) | 30 min (4 GPUs) |
-| Eval (with head, 3 conditions × 200 records) | 30 min (sharded) | 1 hr (longer plans) |
-| **Total** | **~1.5 days** | **~3–4 days** |
-
-The simplified pipeline above (no head, just LoRA + rand-z) takes **~30 min**, end-to-end. It tells us whether the LoRA itself is harmful; it doesn't tell us whether a meaningful task-specific z would have helped.
+Stage-1 head construction recipe + per-task tree caching commands: see [docs/ood_datasets.md § 3](docs/ood_datasets.md).
 
 ---
 
@@ -270,22 +182,13 @@ SFT: Qwen2.5-14B + LoRA r=16, DDP-2 gloo (each task on 2 GPUs in parallel) — t
 
 #### Results
 
-| Task | Base Qwen fewshot | HypPlan z-arm + task-z | **PT-SFT** |
-|---|---|---|---|
-| **PQ** (200) | 60% | 62% | **52.5%** ❌ |
-| **BW** (goal-reaching, 200) | 41% | 33% | **94.5%** ✅ |
-| **GC** (graph coloring, 100) | 61% | 67% | **64%** |
-| **CD** (strict validation, 100) | 0% | 0% | **0%** (lenient string-match: 58%) |
+Numbers are in the **Headline results** section above (PT-SFT row). Three distinct failure modes:
 
-Apples-to-oranges with HypPlan: PT-SFT trains *on each task's training data*, while HypPlan trains only on G24 and probes the OOD transfer. Even so, three distinct failure modes show up:
+- **PQ — format learning, not reasoning**: PT-SFT *underperforms* base (52.5 vs 60). Generations have correct planning-token format but mostly default to "Answer: A" regardless of input. The model learned to mimic the trajectory shape, not the deduction.
+- **BW — surface-pattern fit, not planning**: PT-SFT 94.5% is not evidence of compositional planning. PlanBench BW has (a) only 4 action types, (b) short repetitive gold plans, (c) lenient goal-reaching scoring. 250 SFT examples are enough to fit the surface pattern. PQ + GC under the same recipe don't carry, because they need real deduction / combinatorial search.
+- **CD — hallucinated arithmetic**: lenient string-match `Answer: 647` gives 58%; strict validation (math correct AND uses only pool numbers, via [src/evaluate_generic.py](src/evaluate_generic.py)) gives 0%. Model writes plausible arithmetic chains but injects numbers not in the pool ("562 + 85 = 647" when 85 isn't there).
 
-- **PQ — format learning, not reasoning**: PT-SFT *underperforms* base. Generations have correct planning-token format but mostly default to "Answer: A" regardless of input. The model learned to mimic the trajectory shape, not the deduction.
-- **BW — surface-pattern fit, not planning**: PT-SFT crushes both base and HypPlan, but the +53.5pp jump is not evidence of compositional planning. All three OOD tasks were trained per-task on in-distribution data (PQ regressed by 7.5pp, GC moved +3pp), so "train/test same distribution" alone does not explain BW. What is BW-specific: (a) action vocab is only 4 tokens (PICKUP / PUTDOWN / STACK / UNSTACK), (b) PlanBench gold plans are short (~7-8 steps) and highly repetitive in structure, (c) the goal-reaching scorer is lenient — any simulated plan whose final state ⊇ goal_facts counts, optimality not required. Together these mean 250 SFT examples are enough to fit the surface action-sequence pattern well enough to satisfy the scorer, without learning a general planner. PQ requires actual deduction on novel premises and GC requires real combinatorial search, so the same per-task SFT recipe doesn't carry them.
-- **CD — hallucinated arithmetic**: PT-SFT lenient (just match `Answer: 647` as a substring): 58%. Strict (math correct AND uses only pool numbers, via [src/evaluate_generic.py](src/evaluate_generic.py)): **0%**. The model writes plausible-looking arithmetic chains, but along the way it injects numbers that aren't in the pool — e.g., "562 + 85 = 647" when 85 isn't a remaining number. Reaches the target, doesn't actually solve the puzzle.
-
-**Bottom line:** task-specific PT-SFT does not give us a clean "this is what good reasoning transfer looks like" baseline. BW seems to win but actually memorizes; CD's number is a scoring artifact; PQ regresses. So the comparison with HypPlan stays at the OOD-transfer question — neither approach achieves robust transfer at our training scale.
-
-Eval scripts: [src/eval_pt_ood.py](src/eval_pt_ood.py); raw outputs in [results/eval_pt_ood/](results/eval_pt_ood/).
+**Bottom line:** PT-SFT does not give a clean "this is what good reasoning transfer looks like" baseline. BW wins but memorizes; CD is a scoring artifact; PQ regresses. Eval scripts: [src/eval_pt_ood.py](src/eval_pt_ood.py); raw outputs in [results/eval_pt_ood/](results/eval_pt_ood/).
 
 ---
 
@@ -349,9 +252,11 @@ Inference-time `--random_z` is supported via `src.generate_24_stage2` for sanity
 
 ---
 
-## Headline results (Qwen-14B, 100 Game-24 problems, seed 1234)
+## Headline results
 
-Same 100 held-out problems, single seed, greedy decoding for all non-search rows:
+All numbers below: Qwen-2.5-14B-Instruct unless noted, 100 held-out problems per task, single seed (1234), greedy decoding for all non-search rows.
+
+### Game-24 in-domain (varied-target task is what the LoRA is trained on)
 
 | System | Accuracy | Inference compute / problem |
 |---|---|---|
@@ -364,8 +269,33 @@ Same 100 held-out problems, single seed, greedy decoding for all non-search rows
 | Qwen3-14B ToT top-1 | 0.49 | same |
 | **Qwen-2.5-14B HypPlan DAgger noz-stable** | **0.57** | **1 greedy decode** |
 | Qwen-2.5-14B HypPlan DAgger z-stable | 0.55 | 1 greedy decode |
+| Qwen-2.5-14B HypPlan + LoRA-G24 (task-z) on G24-100 | 0.12 | 1 greedy decode |
 
-**Read.** At 14B scale and n=1, HypPlan's DAgger-trained LoRA (top-1 greedy) effectively ties Qwen3's ToT any-of-5 (0.60) and beats Qwen3's ToT top-1 (0.49) with ~15× less inference compute. The GPT-4 74% number on this benchmark is still ~14–17 pp above our best 14B result.
+At 14B scale, HypPlan's DAgger-trained LoRA (top-1 greedy) effectively ties Qwen3's ToT any-of-5 (0.60) and beats Qwen3's ToT top-1 (0.49) with ~15× less inference compute. GPT-4 sits ~14–17 pp above our best 14B number.
+
+### Cross-task (G24-trained LoRA + per-task heads, plus in-domain baselines)
+
+This is the "does the methodology transfer / does it work in-domain on other tasks" picture. PT-SFT and HypPlan-indom train per-task; LoRA-G24 rows reuse the *same* G24-trained LoRA across all OOD tasks.
+
+| Condition | G24-100 | PQ-100 | BW (goal) | GC-100 |
+|---|---|---|---|---|
+| base (no LoRA, no z) | 11 | 60 | 41 | 61 |
+| LoRA-G24 (no z) | 9 | 63 | 43 | 68 |
+| LoRA-G24 (rand z) | 4 | 43 | 35 | 60 |
+| LoRA-G24 (task z, single-shot) | **12** | 62 | 33 | 67 |
+| LoRA-G24 (task z, dense per-step) | 12 | n/a | 36 | 64 |
+| PT-SFT in-domain (per-task) | 6 | 52.5 | **94.5*** | 64 |
+| ToT (top-1) | 1 | 41 | 58 | 34 |
+| ToT (any-of-5) | 16 | 44 | 83 | 56 |
+| **HypPlan Stage-1+2 in-domain (per-task)** | – | **75** | 10 | **88** |
+
+*PT-SFT BW=94.5% is memorization on PlanBench gold (same distribution as test). Not evidence of compositional planning. See [docs/ood_datasets.md §5](docs/ood_datasets.md#5-planning-tokens-pt-sft-baseline).
+
+Reading the table:
+- **Z transfers in-domain, not OOD**: `LoRA-G24 (task-z) > LoRA-G24 (no z)` only on G24 (+3 pp). On PQ/BW/GC, task-z ≤ no-z.
+- **The G24-trained LoRA itself transfers** to G24-similar tasks even without z: GC +7 pp, PQ +3 pp, BW neutral.
+- **Random z is universally harmful** — z channel is "active" but uninformed-z degrades output.
+- **Stage-1+2 in-domain training is a strong baseline on PQ/GC** (+15 / +27 pp over base). BW is the open problem; failure analysis in [docs/ood_datasets.md §6](docs/ood_datasets.md#6-hypplan-stage-12-trained-in-domain-per-task).
 
 Ablation details and the stability story behind the `noz-stable` / `z-stable` numbers are in *Experiments* below.
 

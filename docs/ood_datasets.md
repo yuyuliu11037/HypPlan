@@ -440,14 +440,7 @@ The model writes "Answer: 647" (matches gold) but step 6 used the number 85 whic
 
 ### Final results
 
-| Task | Base Qwen fewshot | HypPlan z-arm + task-z | HypPlan z-arm no-z | **PT-SFT** |
-|---|---|---|---|---|
-| **PQ** (200) | 60% | 62% | **63%** | **52.5%** ❌ |
-| **BW** (goal-reaching, 200) | 41% | 33% | **43%** | **94.5%** (memorization) |
-| **GC** (graph coloring, 100) | 61% | 67% | **68%** | **64%** |
-| **CD** (strict, 100) | 0% | 0% | 0% | **0%** (lenient: 58%) |
-
-### Interpretation per task
+Numbers live in the consolidated **Headline results** in [README.md](../README.md). Per-task interpretation:
 
 - **PQ** — *format learning, not reasoning*. PT-SFT regresses below base because the model overfits to "emit Answer: A by default" given the small training set + biased label distribution. Short generations like `<PLAN:DERIVE_TRUE> Step 1: ... Answer: A` regardless of question content.
 - **BW** — *memorization*. 94.5% is misleading: PT-SFT trains on 250 records of PlanBench's gold plans and the test set comes from the same distribution. The model regurgitates structurally similar plans that mostly happen to reach the goal. Not evidence of compositional planning.
@@ -476,15 +469,17 @@ The OOD probes above kept the LoRA frozen on G24-varied and only swapped Stage-1
 - **Configs**: `configs/stage2_dagger_{pq,bw,gc}_qwen14b.yaml`.
 - **Training prompt**: a custom chat-template prompt asking for `Step 1: …\nStep 2: …\n…\nAnswer: <X>`. Same prompt at train + eval (clean A/B for the methodology).
 
-### 6.2 Headline numbers (100 records each, top-1)
+### 6.2 Versioning of the in-domain Stage-1+2 result
 
-| | base | LoRA-G24 (no z) | LoRA-G24 (task-z) | PT-SFT-indom | ToT (top-1) | **HypPlan-indom v1** | **HypPlan-indom (cyclic-pad v2)** | **HypPlan-indom (rollouts×3 v3)** |
-|---|---|---|---|---|---|---|---|---|
-| PQ | 60 | 63 | 62 | 52.5 | 41 | **75** | 75 | (unchanged) |
-| BW (goal) | 41 | 43 | 33 | 94.5 | 58 | **0** | **10** | TBD |
-| GC | 61 | 68 | 67 | 64 | 34 | **88** | 88 | (unchanged) |
+Cross-baseline numbers are in the consolidated **Headline results** in [README.md](../README.md). This section tracks the per-version progression as we fixed bugs and tuned the trainer:
 
-PQ + GC: clear in-domain wins (+15pp and +27pp over base). BW: this section explains why BW initially failed and how we have been chipping away at it.
+| Task | v1 (initial DAgger) | v2 (cyclic-pad fix) | v3 (3 rollouts × 4 epochs) |
+|---|---|---|---|
+| PQ | **75** | 75 | (unchanged) |
+| BW (goal) | 0 | **10** | TBD |
+| GC | **88** | 88 | (unchanged) |
+
+PQ + GC: clear in-domain wins from v1 onward (+15pp and +27pp over base). BW: this section explains why v1 failed at 0%, how v2 lifted it to 10%, and what v3 is trying.
 
 ### 6.3 Why BW failed in v1 (0/100 solved)
 
