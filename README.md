@@ -151,32 +151,45 @@ ProntoQA head: `checkpoints/head_pronto_qwen14b_rank/head.pt`. Blocksworld head:
 
 | Dataset | base | lora (no z) | lora + rand-z | **lora + task-z** |
 |---|---|---|---|---|
+| **G24-100 (in-domain)** | 11% | 9% | 4% | **12%** ✅ |
 | **ProntoQA** | 60% | **63%** | 43% | 62% |
 | **Blocksworld** (goal-reaching) | 41% | **43%** | 35% | 33% |
 | **Graph Coloring** | 61% | **68%** | 60% | 67% |
 | Blocksworld (exact-match — under-estimate) | 1% | 0% | 2% | 2% |
 | Blocksworld (avg actions / zero-action) | 9.0 / 0 | 8.8 / 0 | 6.1 / 7 | 5.9 / 15 |
 
+**Note on injection regime**: For G24, `task-z` uses *dense per-step-boundary* z injection via [src/dagger_rollout_varied.py](src/dagger_rollout_varied.py)'s `rollout_one` (matches DAgger training). For OOD probes (PQ/BW/GC), the originally reported `task-z` numbers used **single-shot** injection (one z at start of generation) because OOD outputs lack G24-style step markers. To rule out density as the OOD failure mechanism, we re-ran BW and GC with *dense state-aware* injection (per-line, with state-updates after each emitted step):
+
+| Task | lora-noz | task-z single | **task-z dense** | Δ dense vs single |
+|---|---|---|---|---|
+| BW (goal-reaching) | 43% | 33% | **36%** | +3pp |
+| GC | 68% | 67% | **64%** | -3pp |
+
+Dense doesn't bridge the gap. **Even with the same per-step injection that works in-domain, the LoRA still fails to use task-z on OOD tasks.** The OOD-failure mechanism is task-structure mismatch, not injection sparsity. Driver: [src/eval_dense_z.py](src/eval_dense_z.py).
+
 (Results in [results/eval_ood_v2/](results/eval_ood_v2/). Goal-reaching = simulate the model's plan from initial state and check if `goal_facts ⊆ final_state`; matches PlanBench's spirit. Exact-match is strict string equality with gold plan and **drastically under-estimates** correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).)
 
-#### What v2 reveals (with Graph Coloring added)
+#### What the full table reveals
 
-1. **Task-z does not beat LoRA-no-z** on any of the three OOD probes (62 vs 63 on ProntoQA; 33 vs 43 on Blocksworld; 67 vs 68 on Graph Coloring). The properly-trained, dimension-matched, task-specific Stage-1 head's z signal **fails to add value over no-z** when injected into a LoRA only trained on G24-varied. Single-z-at-start injection regime is too sparse for tasks lacking G24's `Step N: a op b = r` step-boundary structure.
-2. **But the LoRA itself transfers usefully on tasks structurally similar to G24.** On Graph Coloring (constraint satisfaction with sequential decisions, like G24's "pick op + check constraint"), G24-LoRA-no-z gives **+7pp over base** (61→68). On ProntoQA (deductive reasoning), modest +3pp. On Blocksworld (long-horizon planning), neutral (+2pp).
-3. **The z channel is corruption-prone on tasks unlike G24**: random z hurts ProntoQA (-20pp) and Blocksworld (-8pp). On Graph Coloring it's nearly neutral (-1pp), again hinting that constraint-satisfaction structure is closest to G24.
+1. **Z works on the training distribution (G24)** — lora_taskz beats lora-no-z by +3pp (12 vs 9) and beats base by +1pp (12 vs 11). This is where the LoRA was trained to read z at every step boundary, so single-shot z eval still earns its keep.
+2. **Z does NOT transfer to OOD** — on PQ/BW/GC, lora_taskz never beats lora-no-z. The injection regime (z once at start of generation) is too sparse for tasks lacking G24's step-boundary structure.
+3. **But the LoRA itself transfers usefully on tasks structurally similar to G24.** On Graph Coloring (constraint satisfaction with sequential decisions, like G24's "pick op + check constraint"), G24-LoRA-no-z gives **+7pp over base** (61→68). On ProntoQA (deductive reasoning), modest +3pp. On Blocksworld (long-horizon planning), neutral (+2pp).
+4. **Random z is the worst condition on every task** — most extreme on ProntoQA (-20pp from no-z) and G24 (-5pp from no-z). The z channel is "active" (perturbations matter) but uninformed-z is universally harmful.
 
 #### Bottom line
 
-The hypothesis "LoRA learns to use meaningful z generalizably" is **partially supported**:
-- **Negative on z**: even a properly-trained task-specific head's z does not improve over LoRA-no-z. The geometric channel doesn't transfer at our single-injection eval setup.
-- **Positive on the LoRA itself**: G24-LoRA SFT generalizes to other constraint-satisfaction-style reasoning (graph coloring +7pp) — not just G24's specific task.
+The hypothesis splits into two pieces:
 
-The interesting story is *what kind of OOD transfer the LoRA achieves without z*: arithmetic-style sequential constraint reasoning generalizes cleanly to graph coloring, partially to deductive logic, not at all to long-horizon symbolic planning.
+- **"z helps in-domain" — confirmed.** On G24-100 (training distribution), lora_taskz = 12% beats both base (11%) and lora-no-z (9%). The geometric channel does its job *at training-time injection density*.
+- **"z transfers to OOD tasks" — not supported.** On PQ/BW/GC, lora_taskz ≤ lora-no-z. Single-shot z at start of generation is too sparse for tasks without G24-style step boundaries.
+- **"the LoRA's task generalization itself" — partially supported.** G24-LoRA SFT transfers most cleanly to constraint-satisfaction-style reasoning (graph coloring +7pp), modestly to deductive logic (PQ +3pp), neutral on long-horizon planning (BW +2pp). The pattern tracks structural similarity to G24's "pick step + check constraint" loop.
 
-Possible follow-ups:
-- Inject z at **every reasoning-step boundary** in OOD prompts (not just once)
+Followups tried:
+- ✅ **Dense per-step-boundary z injection** on OOD (BW, GC): doesn't bridge the gap (BW 33→36, GC 67→64). Density isn't the bottleneck — task-structure mismatch is.
+
+Followups still open:
 - Train the LoRA on a *mixture* of arithmetic + deductive / planning tasks — so the LoRA actually learns to read z across task types
-- Use a much larger Stage-1 head (more capacity to distinguish OOD states)
+- Use a larger Stage-1 head (more capacity to distinguish OOD states)
 
 #### ProntoQA findings
 
@@ -267,7 +280,7 @@ SFT: Qwen2.5-14B + LoRA r=16, DDP-2 gloo (each task on 2 GPUs in parallel) — t
 Apples-to-oranges with HypPlan: PT-SFT trains *on each task's training data*, while HypPlan trains only on G24 and probes the OOD transfer. Even so, three distinct failure modes show up:
 
 - **PQ — format learning, not reasoning**: PT-SFT *underperforms* base. Generations have correct planning-token format but mostly default to "Answer: A" regardless of input. The model learned to mimic the trajectory shape, not the deduction.
-- **BW — memorization, not planning**: PT-SFT crushes both base and HypPlan because the train set is 250 records of PlanBench's gold plans, and the test set comes from the same distribution. The model essentially regurgitates similar action sequences. This 94.5% is a **memorization ceiling**, not evidence of compositional planning.
+- **BW — surface-pattern fit, not planning**: PT-SFT crushes both base and HypPlan, but the +53.5pp jump is not evidence of compositional planning. All three OOD tasks were trained per-task on in-distribution data (PQ regressed by 7.5pp, GC moved +3pp), so "train/test same distribution" alone does not explain BW. What is BW-specific: (a) action vocab is only 4 tokens (PICKUP / PUTDOWN / STACK / UNSTACK), (b) PlanBench gold plans are short (~7-8 steps) and highly repetitive in structure, (c) the goal-reaching scorer is lenient — any simulated plan whose final state ⊇ goal_facts counts, optimality not required. Together these mean 250 SFT examples are enough to fit the surface action-sequence pattern well enough to satisfy the scorer, without learning a general planner. PQ requires actual deduction on novel premises and GC requires real combinatorial search, so the same per-task SFT recipe doesn't carry them.
 - **CD — hallucinated arithmetic**: PT-SFT lenient (just match `Answer: 647` as a substring): 58%. Strict (math correct AND uses only pool numbers, via [src/evaluate_generic.py](src/evaluate_generic.py)): **0%**. The model writes plausible-looking arithmetic chains, but along the way it injects numbers that aren't in the pool — e.g., "562 + 85 = 647" when 85 isn't a remaining number. Reaches the target, doesn't actually solve the puzzle.
 
 **Bottom line:** task-specific PT-SFT does not give us a clean "this is what good reasoning transfer looks like" baseline. BW seems to win but actually memorizes; CD's number is a scoring artifact; PQ regresses. So the comparison with HypPlan stays at the OOD-transfer question — neither approach achieves robust transfer at our training scale.

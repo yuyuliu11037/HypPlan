@@ -214,3 +214,5 @@ runs/
 data/
 checkpoints/
 results/
+
+.claude/
