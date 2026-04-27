@@ -196,15 +196,63 @@ A second reasoning-family group, mirroring Group A's structure for a publication
 - CLUTRR hop counts {2,3,4} for an internal difficulty gradient
 - Empirical eval-scale check at depth 5/6/7 with 24 preds / 30 rules: median tree size 23/58/63 nodes, branching 2.0/2.5/2.7, well within enumerable.
 
-### In-progress / pending
-- Tree-data caches (running on GPUs 1, 6, 7; ~2-3hr wall time)
-- 4 Stage-1 heads (after tree-data)
-- 1 rule-chaining Stage-2 LoRA (the Group B task-agnostic LoRA)
-- 4-cell OOD eval matrix on synthlogic / clutrr / minisudoku
-- Matched-prompt control on synthlogic
-- 3 in-domain Stage-2 LoRAs + eval
-- 4 PT-SFT baselines + eval
-- Doc/README updates with the Group B headline table
+### Plan iteration 2 (locked 2026-04-26 PM)
+
+After base 4-bit eval on candidate Group A OOD #1:
+- **Linear-Equations: 99% base** — too easy, abandoned (kept code as
+  reference under `lineq_*` names).
+- **cd_small** (4 numbers, 2-digit target): ~10% base, viable but
+  abandoned in favour of numpath.
+- **Number-path** (reachability with fixed op set): **34.5% base** —
+  selected as Group A OOD #1.
+- **mini-Sudoku**: deleted entirely.
+
+Final group composition:
+- A (Quantitative / Concrete-Object): 24 Game / Number-path / Blocksworld / Graph Coloring
+- B (Logical / Deductive): rule-chaining / ProntoQA / CLUTRR / ProofWriter (CWA d3)
+
+### Three-baseline matrix (locked 2026-04-27 AM)
+
+All 3 × 8 baseline cells run, per-cell results committed under
+`results/baselines/{task}_{mode}.jsonl` + `.summary.txt`.
+
+| Task | Base | ToT top-1 | ToT any-5 | SC any-5 | SC maj | PT-SFT |
+|---|---|---|---|---|---|---|
+| 24 Game | 11% | 10% | 20% | 21% | 21% | 6% |
+| Number-path | 34.5% | 32% | 40% | 42% | 32% | **44.5%** |
+| Blocksworld | 41% | 58% | 83% | 76% | 60% | 94.5% |
+| Graph Coloring | 61% | 34% | 56% | 80% | 66% | 64% |
+| rule-chaining | 53% | 52% | 80% | 82% | 78% | **87.2%** |
+| ProntoQA | 60% | 41% | 44% | 60% | 58% | 52.5% |
+| CLUTRR-like | 13% | 10% | 14% | 14% | 10% | **100%** ⁂ |
+| ProofWriter | 70% | 69% | 89% | 88% | 74% | 49% |
+
+⁂ CLUTRR PT-SFT 100% is a memorisation ceiling — train + test share
+the same finite kinship composition table; not a generalisation claim
+(parallel to v1 BW PT-SFT 94.5% memorising PlanBench gold).
+
+Caveats:
+- Numbers in this session are **4-bit Qwen-14B-Instruct** (memory
+  budget); v1 numbers (G24, BW, GC, ProntoQA, the 4 v1 PT-SFT cells)
+  are bf16. 4-bit is a lower bound on bf16.
+- ToT is *not* the v1 propose+value tot_ood.py for the new tasks
+  (which would require new ToT-specific adapters per task). It is a
+  K=5 sampled-rollout runner using the dagger_ood adapter prompts;
+  reported `top-1` is a single greedy rollout under the same
+  structured prompt, `any-of-5` is "any of 5 samples solves".
+- rulechain test set is 600 records (vs the 200-record OOD norm)
+  because rulechain is the training source and reuses the same test
+  generator. SC was capped to 200 via `--limit 200`; ToT and PT-SFT
+  used full 600.
+
+### Pending (HypPlan Stage-1+2 transfer experiment)
+
+- Stage-1 head training for the Group B tasks (rulechain, PQ, CLUTRR,
+  ProofWriter; tree-data caches partially built before the plan
+  reset).
+- Rule-chaining Stage-2 LoRA training (the Group B task-agnostic LoRA).
+- Group A and Group B 4-cell OOD eval matrices (base / lora-noz /
+  lora-randz / lora-taskz) using the trained LoRAs.
 
 ---
 
