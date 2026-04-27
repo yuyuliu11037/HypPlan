@@ -113,12 +113,29 @@ def _build_problem_and_render(task: str, rec: dict):
         texts = [render_state(p, n.state) for n in tree.nodes]
         return p, tree, texts
 
+    if task == "numpath":
+        from src.oracle_numpath import (
+            Op, Problem, enumerate_tree, render_state,
+        )
+        ops = tuple(Op(o["kind"], int(o["const"])) for o in rec["ops"])
+        p = Problem(
+            start=int(rec["start"]),
+            target=int(rec["target"]),
+            ops=ops,
+            max_value=int(rec.get("max_value", 999)),
+        )
+        max_depth = int(rec.get("n_steps", 5)) + 4
+        tree = enumerate_tree(p, max_nodes=2000, max_depth=max_depth)
+        texts = [render_state(p, n.state) for n in tree.nodes]
+        return p, tree, texts
+
     raise ValueError(f"Unknown task: {task}")
 
 
 def _is_success(task: str, node) -> bool:
     """Map task-specific terminal-success predicate to the unified field."""
-    if task in ("rulechain", "synthlogic", "lineq", "proofwriter"):
+    if task in ("rulechain", "synthlogic", "lineq", "proofwriter",
+                 "numpath"):
         return node.is_solved
     if task == "clutrr":
         return node.is_solved
@@ -170,7 +187,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True,
                      choices=["rulechain", "synthlogic", "clutrr", "lineq",
-                              "proofwriter"])
+                              "proofwriter", "numpath"])
     ap.add_argument("--data_prefix", default=None,
                      help="Override default data/{task}. Used for reading "
                           "data/{prefix}_{split}.jsonl instead.")

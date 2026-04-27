@@ -17,6 +17,7 @@
 #
 # Each phase commits + pushes its results.
 set -e
+set -o pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$PROJECT_ROOT"
@@ -26,6 +27,9 @@ mkdir -p "$LOG_DIR" results/eval_stage2_indomain
 
 TORCHRUN=/data/yuyu/.local/bin/torchrun
 export HYPPLAN_DIST_BACKEND=gloo
+# torchrun spawns workers in fresh subprocesses; PYTHONPATH lets them
+# import `src.*` modules without relying on cwd.
+export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
 # ---------- Helper: run sharded eval + commit ----------
 eval_indomain() {
