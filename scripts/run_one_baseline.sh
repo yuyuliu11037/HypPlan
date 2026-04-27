@@ -19,11 +19,14 @@ set -e
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$PROJECT_ROOT"
 
-TASK=$1
-MODE=$2
-SW=${3:-6}
-DATA=${4:-data/${TASK}_test.jsonl}
-shift 4 || true
+TASK=$1; shift
+MODE=$1; shift
+SW=${1:-6}; shift || true
+if [ $# -ge 1 ] && [[ "$1" != --* ]]; then
+  DATA=$1; shift
+else
+  DATA="data/${TASK}_test.jsonl"
+fi
 EXTRA="$@"
 
 OUT_PATH="results/baselines/${TASK}_${MODE}.jsonl"

@@ -20,7 +20,7 @@ cd "$PROJECT_ROOT"
 # =============================================================
 TOT_TASKS=(
   "numpath data/numpath_test.jsonl"
-  "rulechain data/rulechain_test.jsonl"
+  "rulechain data/rulechain_test.jsonl --limit 200"
   "clutrr data/clutrr_test.jsonl"
   "proofwriter data/proofwriter_test.jsonl"
   "g24 data/24_test.jsonl --limit 100"
@@ -41,7 +41,7 @@ done
 # =============================================================
 SC_TASKS=(
   "numpath data/numpath_test.jsonl"
-  "rulechain data/rulechain_test.jsonl"
+  "rulechain data/rulechain_test.jsonl --limit 200"
   "clutrr data/clutrr_test.jsonl"
   "proofwriter data/proofwriter_test.jsonl"
   "pq data/prontoqa_test.jsonl"
