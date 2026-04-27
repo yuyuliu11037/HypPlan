@@ -501,5 +501,283 @@ class GraphColorAdapter:
         return f"Step {step_num}:"
 
 
-ADAPTERS = {"pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
-             "gc": GraphColorAdapter}
+# ---------- RuleChain (Group B training source) / Synthlogic (OOD) ----------
+
+
+class RuleChainAdapter:
+    """Adapter for synthetic Horn-clause forward chaining.
+
+    Used both for the Group B training source (`rulechain`) and for the
+    harder OOD eval (`synthlogic`). The two share the same primitive; they
+    differ only in JSONL data parameters (depth, predicate count,
+    pred_prefix). One adapter class, two registry entries."""
+    name = "rulechain"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = ANSWER_RE
+
+    def __init__(self, rec: dict):
+        from src.oracle_rulechain import Problem, Rule
+        self.rec = rec
+        rules = tuple(
+            Rule(premises=tuple(sorted(r["premises"])),
+                 conclusion=r["conclusion"])
+            for r in rec["rules"]
+        )
+        self.problem = Problem(
+            initial_facts=frozenset(rec["initial_facts"]),
+            target=rec["target"],
+            rules=rules,
+        )
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return self.problem.initial_facts
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_rulechain import enumerate_tree
+            self._tree = enumerate_tree(self.problem, max_nodes=20000,
+                                         max_depth=12)
+        return self._tree
+
+    def winning_steps(self, state):
+        from src.oracle_rulechain import applicable_rules, apply_rule
+        tree = self._tree_lazy()
+        node_id = None
+        for n in tree.nodes:
+            if n.state == state:
+                node_id = n.node_id
+                break
+        if node_id is None:
+            return []
+        node = tree.nodes[node_id]
+        if node.v_value <= 0:
+            return []
+        winners = []
+        for r in applicable_rules(state, self.problem.rules):
+            ns = apply_rule(state, r)
+            for cid in node.children:
+                if tree.nodes[cid].state == ns:
+                    if (tree.nodes[cid].v_value >= 0
+                        and tree.nodes[cid].v_value < node.v_value):
+                        winners.append((r, ns))
+                    break
+        return winners
+
+    def validate_apply(self, state, action):
+        from src.oracle_rulechain import validate_step
+        rule, _ = action
+        legal, ns = validate_step(state, rule, self.problem)
+        return legal, ns
+
+    def is_solved(self, state):
+        from src.oracle_rulechain import decidable
+        return decidable(state, self.problem.target)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_rulechain import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, rule):
+        from src.oracle_rulechain import format_step_text
+        return format_step_text(rule)
+
+    def parse_step(self, step_body: str, state, history):
+        from src.oracle_rulechain import (
+            apply_rule, applicable_rules, parse_step,
+        )
+        rule = parse_step(step_body, self.problem)
+        if rule is None:
+            return None
+        if rule not in self.problem.rules:
+            return None
+        if rule.conclusion in state:
+            return None
+        if not all(p in state for p in rule.premises):
+            return None
+        ns = apply_rule(state, rule)
+        return (rule, ns), step_body.strip()
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        rule, _ = action
+        body = self._action_text(rule)
+        if self.is_solved(state_after):
+            return f" {body}. Answer: {self.problem.target} is derived"
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve a forward-chaining derivation task. Apply one "
+                "rule per step until the target predicate is derived. Output "
+                "format:\n"
+                "  Step 1: apply rule: if A and B, then C.\n"
+                "  Step 2: apply rule: if C, then D.\n"
+                "  ...\n"
+                "  Step K: apply rule: if ..., then <target>. Answer: <target> "
+                "is derived\n"
+                "Use ONLY the rules given. Each step must apply exactly one "
+                "rule whose premises are already known.")
+        rules_text = "\n".join(
+            f"- {r.render()}" for r in self.problem.rules
+        )
+        init = ", ".join(sorted(self.problem.initial_facts))
+        user = (f"Rules:\n{rules_text}\n\n"
+                f"Initial facts: {init}\n"
+                f"Goal: derive {self.problem.target}")
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        return f"Step {step_num}:"
+
+
+class SynthlogicAdapter(RuleChainAdapter):
+    """OOD eval-only synthlogic. Identical primitive to RuleChainAdapter;
+    distinct registry entry so eval drivers and configs can reference
+    `synthlogic` as its own task."""
+    name = "synthlogic"
+
+
+# ---------- CLUTRR-like (kinship reasoning, OOD) ----------
+
+
+class CLUTRRAdapter:
+    name = "clutrr"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = ANSWER_RE
+
+    def __init__(self, rec: dict):
+        from src.oracle_clutrr import Problem
+        self.rec = rec
+        self.problem = Problem(
+            entities=tuple(rec["entities"]),
+            edges=tuple((i, rel, j) for (i, rel, j) in rec["edges"]),
+            query=tuple(rec["query"]),
+            answer=rec["answer"],
+            chain=tuple(rec["chain"]),
+        )
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return ()  # empty composition prefix
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_clutrr import enumerate_tree
+            self._tree = enumerate_tree(self.problem, max_nodes=200)
+        return self._tree
+
+    def winning_steps(self, state):
+        from src.oracle_clutrr import winning_steps as ws, validate_step
+        tree = self._tree_lazy()
+        d = len(state)
+        if d >= len(self.problem.chain):
+            return []
+        wins = ws(state, self.problem)
+        out = []
+        for (h, rel) in wins:
+            legal, ns = validate_step(state, h, rel, self.problem)
+            if legal:
+                out.append(((h, rel), ns))
+        return out
+
+    def validate_apply(self, state, action):
+        from src.oracle_clutrr import validate_step
+        (h, rel), _ = action
+        legal, ns = validate_step(state, h, rel, self.problem)
+        return legal, ns
+
+    def is_solved(self, state):
+        from src.oracle_clutrr import is_solved
+        return is_solved(state, self.problem)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_clutrr import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, action, state_after):
+        # state_after's last element is the new derived relation.
+        head = self.problem.entities[self.problem.query[0]]
+        d = len(state_after) - 1
+        intermediate = self.problem.entities[d + 1]
+        derived_rel = state_after[-1]
+        return f"{head} is the {derived_rel} of {intermediate}"
+
+    def parse_step(self, step_body: str, state, history):
+        from src.oracle_clutrr import parse_step, validate_step
+        out = parse_step(step_body, self.problem, len(state))
+        if out is None:
+            return None
+        h, rel = out
+        legal, ns = validate_step(state, h, rel, self.problem)
+        if not legal:
+            return None
+        return ((h, rel), ns), step_body.strip()
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        body = self._action_text(action, state_after)
+        if self.is_solved(state_after):
+            tail = self.problem.entities[self.problem.query[1]]
+            return (f" {body}. Answer: "
+                    f"{self.problem.entities[self.problem.query[0]]} is the "
+                    f"{self.problem.answer} of {tail}")
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve a kinship-relation composition task. Read the "
+                "story, then derive the relation between the queried head and "
+                "tail entities by composing one kinship hop per step. Output "
+                "format:\n"
+                "  Step 1: <head> is the <relation> of <intermediate1>.\n"
+                "  Step 2: <head> is the <relation> of <intermediate2>.\n"
+                "  ...\n"
+                "  Step K: <head> is the <derived_relation> of <tail>. "
+                "Answer: <head> is the <relation> of <tail>")
+        story_lines = [
+            f"{self.problem.entities[i]} is the {rel} of "
+            f"{self.problem.entities[j]}."
+            for (i, rel, j) in self.problem.edges
+        ]
+        head = self.problem.entities[self.problem.query[0]]
+        tail = self.problem.entities[self.problem.query[1]]
+        user = (
+            "\n".join(story_lines)
+            + f"\n\nQuestion: How is {head} related to {tail}?"
+        )
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        return f"Step {step_num}:"
+
+
+ADAPTERS = {
+    "pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
+    "gc": GraphColorAdapter,
+    "rulechain": RuleChainAdapter,
+    "synthlogic": SynthlogicAdapter,
+    "clutrr": CLUTRRAdapter,
+}

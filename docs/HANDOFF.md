@@ -21,10 +21,10 @@ If true, we should see `lora + task-z > lora + no-z > base` on OOD tasks.
 | Mode | G24-100 (in-domain) | ProntoQA | Blocksworld (goal-reaching) | Graph Coloring |
 |---|---|---|---|---|
 | base (no LoRA, no z) | 11% | 60% | 41% | 61% |
-| lora (no z) | 9% | **63%** | **43%** | **68%** |
-| lora + rand-z | 4% | 43% | 35% | 60% |
-| **lora + task-z** | **12%** ✅ | 62% | 33% | 67% |
-| **lora + task-z (dense)** | (= 12%, same as above) | n/a (no boundaries to inject at) | 36% | 64% |
+| lora-G24 (no z) | 9% | **63%** | **43%** | **68%** |
+| lora-G24 + rand-z | 4% | 43% | 35% | 60% |
+| lora-G24 (no z) + CoT prompt | – | 74% | – | – |
+| lora-G24 + dense per-step task-z + CoT prompt | – | 67% | – | – |
 
 PT-SFT (separate Qwen + per-task LoRA SFT'd on each task's data, planning-tokens-augmented; not directly comparable):
 - G24 **6%** (much worse than base 11%; format-correct planning tokens but arithmetic wrong)
@@ -46,17 +46,19 @@ HypPlan Stage-1+2 trained IN-DOMAIN per task (DAgger Stage-2 LoRA+UpProjector + 
 | Task | Correct | vs base | vs PT-SFT-indom |
 |---|---|---|---|
 | PQ | **75%** | 60 → +15pp | 52.5 → +22.5pp |
-| BW (goal) | **10%** | 41 → −31pp | 94.5 → −84.5pp |
+| BW (goal) | **67%** | 41 → +26pp | 94.5 → −27.5pp |
 | GC | **88%** | 61 → +27pp | 64 → +24pp |
 
-PQ + GC: HypPlan Stage-1+2 in-domain clearly beats every prior arm. BW: model still mostly cycles (72/100 hit depth budget), but the cyclic-pad fix raised it from 0% → 10%. Initial sync used global-min, throwing away ~75% of the rollout pairs; replacing it with cyclic-pad-to-global-max (each rank repeats its own pairs to match the busiest rank) gives 266 train steps/epoch vs 82 before — 3.2× more supervision and the first non-zero BW solve rate. Same prompt for train + eval; for BW the gap reflects task complexity (multi-block 3D state) on a base model not pretrained for planning.
+All three tasks beat the base/LoRA-G24/PT-SFT (excluding BW PT-SFT which is a memorization ceiling). BW jumped 0% → 10% → 67% across v1 → v2 → v3 of the trainer:
+- v1 used global-min DDP sync, throwing away ~75% of rollout pairs (only 41 steps/epoch on BW).
+- v2 cyclic-pad-to-global-max kept all rollout pairs (266 steps/epoch); BW lifted to 10%.
+- v3 added 3 rollouts/problem (~1300 steps/epoch on BW) and per-epoch checkpointing; BW lifted to 67%.
 
 ### What the table shows
 
-1. **Z works in-domain, doesn't transfer OOD.** Only G24-100 has `lora_taskz > lora_noz` (+3pp). On all 3 OOD probes, `lora_taskz ≤ lora_noz`.
-2. **Density isn't the OOD bottleneck** — we ran dense per-step-boundary injection on BW (33→36) and GC (67→64). Still fails to beat no-z. So the OOD failure is task-structure mismatch, not injection sparsity.
-3. **The LoRA itself transfers** to G24-similar tasks even without z. GC (constraint satisfaction with sequential decisions) +7pp over base. PQ +3pp. BW neutral.
-4. **Random z is universally harmful** — the z channel is "active" in the LoRA but uninformed-z degrades output.
+1. **Dense per-step task-z does NOT help OOD even with a matched CoT prompt.** PQ controlled comparison: `LoRA-G24 + CoT prompt` gives 74% no-z vs 67% with dense per-step task-z (−7pp). The geometric z signal genuinely doesn't transfer to deductive reasoning.
+2. **The LoRA itself transfers** to G24-similar tasks even without z. GC (constraint satisfaction with sequential decisions) +7pp over base. PQ +3pp. BW neutral. Most of the in-domain PQ "win" comes from the prompt change (74% no-z, CoT) rather than per-task Stage-2 training.
+3. **Random z is universally harmful** — the z channel is "active" in the LoRA but uninformed-z degrades output.
 
 ---
 
@@ -99,10 +101,8 @@ data/
 ```
 results/
 ├── eval_g24_indomain/                         # G24-100 4-condition matrix (lora_noz, lora_randz, lora_taskz)
-├── eval_ood_v2/                               # OOD single-shot 4-condition: PQ, BW, GC, CD
-├── eval_gc_v1/                                # graph coloring 4-condition + PT-SFT
 ├── eval_pt_ood/                               # PT-SFT eval on PQ/BW/CD/GC
-├── eval_dense_z/                              # dense per-step injection ablation (BW, GC)
+├── eval_pq_dense_z/                           # PQ controlled CoT-prompt no-z vs dense-z (2026-04-26)
 ├── eval_pt_g24/                               # PT-SFT G24 eval (2026-04-25)
 ├── tot_ood/{pq,bw,gc}/                        # ToT BFS on the 3 OOD tasks (2026-04-25)
 ├── eval_stage2_indomain/{pq,bw,gc}/           # HypPlan Stage-1+2 in-domain (2026-04-26)
@@ -123,7 +123,6 @@ results/
 
 **Eval drivers**:
 - [src/eval_ood_generic.py](../src/eval_ood_generic.py) — single-shot z (used for v2 results)
-- [src/eval_dense_z.py](../src/eval_dense_z.py) — **dense per-step z** ablation (new); supports tasks g24/gc/bw, modes single/dense
 - [src/eval_pt_ood.py](../src/eval_pt_ood.py) — PT-SFT inference on OOD tasks
 - [src/eval_pt_g24.py](../src/eval_pt_g24.py) — PT-SFT inference on G24 (2026-04-25)
 - [src/tot_ood.py](../src/tot_ood.py) — generic ToT BFS for PQ/BW/GC (2026-04-25)
@@ -162,8 +161,50 @@ results/
 
 1. **Mixture training**: train a Stage-2 LoRA on a *mixture* of arithmetic + deductive + planning task data, so the LoRA learns to read z across task structures. This is the cleanest test of whether HypPlan's transfer story is achievable at all.
 2. **Larger head**: scale Stage-1 head capacity (hidden_dims, hyp_dim) to see if it helps OOD discrimination.
-3. **PQ dense z**: PQ outputs are 1-2 tokens with our current prompt, so dense-injection has nowhere to fire. Could change prompt to encourage step-by-step (CoT) and re-run with dense.
+3. **PQ dense-z (CoT prompt) — done**: dense per-step task-z hurts PQ by 7pp under matched-prompt control (74% no-z vs 67% dense-z). Confirms density isn't the bottleneck for OOD task-z; geometric z genuinely doesn't transfer to deductive reasoning.
 4. **Cross-validate on more OOD tasks**: arithmetic-similar (Countdown was uninformative due to scoring artifacts; could try arithmetic word problems), or other CSP-style problems (boolean SAT?).
+
+---
+
+## Group B replication — IN PROGRESS (started 2026-04-26)
+
+A second reasoning-family group, mirroring Group A's structure for a publication-strength replication.
+
+| Group A | Group B analog |
+|---|---|
+| 24_varied_bal (training source) | rulechain (Horn-clause forward chaining, depth {2,3,4}, 16 preds, 18 rules, prefix `p`) |
+| ProntoQA | synthlogic (same primitive, depth {5,6,7}, 24 preds, 30 rules, prefix `q` — vocabulary differs from training) |
+| Blocksworld | CLUTRR-like (kinship composition, hop counts {2,3,4}, in-house generator) |
+| Graph Coloring | mini-Sudoku (4×4 CSP, n_clues {4,5,6}) |
+
+### Code delivered
+- Oracles: [src/oracle_rulechain.py](../src/oracle_rulechain.py), [src/oracle_minisudoku.py](../src/oracle_minisudoku.py), [src/oracle_clutrr.py](../src/oracle_clutrr.py). Synthlogic reuses `oracle_rulechain` with `pred_prefix='q'`.
+- Adapters added to [src/dagger_ood_adapters.py](../src/dagger_ood_adapters.py): `RuleChainAdapter`, `SynthlogicAdapter`, `CLUTRRAdapter`, `MiniSudokuAdapter`. End-to-end rollout walks 5/5 on each.
+- Scorers added to [src/score_ood.py](../src/score_ood.py): `score_rulechain`, `score_clutrr`, `score_minisudoku`. Gold-trajectory round-trip 5/5 on each.
+- Eval driver task choices extended in [src/eval_ood_generic.py](../src/eval_ood_generic.py).
+- Data generators: [data/generate_data_{rulechain,synthlogic,clutrr,minisudoku}.py](../data/), [data/generate_tree_data_groupB.py](../data/generate_tree_data_groupB.py) (unified, --task dispatch), [data/annotate_sft_plan_groupB.py](../data/annotate_sft_plan_groupB.py) (SFT-PT planning-token annotator).
+- Configs: [configs/head_{rulechain,synthlogic,clutrr,minisudoku}_qwen14b_rank.yaml](../configs/), [configs/stage2_dagger_{rulechain_balanced,synthlogic,clutrr,minisudoku}_qwen14b.yaml](../configs/), [configs/sft_pt_{rulechain,synthlogic,clutrr,minisudoku}_qwen14b.yaml](../configs/).
+- Vendored CLUTRR source at [external/clutrr/](../external/clutrr/) for reference (not used at runtime; in-house generator avoids matplotlib/sacremoses deps).
+
+### Data delivered
+- JSONL: 6000+600+600 rulechain, 1000+200+200 synthlogic, 2000+200+200 clutrr, 2000+200+200 minisudoku.
+- SFT-PT JSONL with `<PLAN:APPLY> / <PLAN:COMPOSE> / <PLAN:PLACE> / <PLAN:ANS>` tags.
+
+### Locked-in design (per user feedback 2026-04-26)
+- Training depth {2,3,4}, eval depth {5,6,7} (no trivial depth-1)
+- Eval predicate prefix `q` (training uses `p`) so model can't generalize via surface vocabulary
+- CLUTRR hop counts {2,3,4} for an internal difficulty gradient
+- Empirical eval-scale check at depth 5/6/7 with 24 preds / 30 rules: median tree size 23/58/63 nodes, branching 2.0/2.5/2.7, well within enumerable.
+
+### In-progress / pending
+- Tree-data caches (running on GPUs 1, 6, 7; ~2-3hr wall time)
+- 4 Stage-1 heads (after tree-data)
+- 1 rule-chaining Stage-2 LoRA (the Group B task-agnostic LoRA)
+- 4-cell OOD eval matrix on synthlogic / clutrr / minisudoku
+- Matched-prompt control on synthlogic
+- 3 in-domain Stage-2 LoRAs + eval
+- 4 PT-SFT baselines + eval
+- Doc/README updates with the Group B headline table
 
 ---
 

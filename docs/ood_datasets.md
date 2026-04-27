@@ -362,9 +362,11 @@ HYPPLAN_DIST_BACKEND=gloo CUDA_VISIBLE_DEVICES=6 \
 HYPPLAN_DIST_BACKEND=gloo CUDA_VISIBLE_DEVICES=7 \
   python -m src.train_head --config configs/head_blocksworld_qwen14b_rank.yaml
 
-# 4.4 — Eval (4 modes per task: base / lora / lora_randz / lora_taskz)
-# `lora_taskz` will use --head_override pointing at the new task-specific head.
-# (Eval driver update + final results table forthcoming.)
+# 4.4 — Eval (3 baseline modes per task: base / lora / lora_randz)
+# Driver: src/eval_ood_generic.py. The lora_taskz mode (single-shot z + original
+# test prompt) was deprecated — that prompt format doesn't match how the LoRA
+# was trained to read z. Use src/eval_stage2_indomain.py with a CoT prompt
+# instead (see § 6 below).
 
 # Scoring
 python -m src.score_ood --task prontoqa            --input results/eval_ood/prontoqa_*.jsonl
@@ -452,7 +454,7 @@ Numbers live in the consolidated **Headline results** in [README.md](../README.m
 PT-SFT is task-specific in-domain training, fundamentally different from HypPlan's G24-only training + OOD probes. The 4-task picture:
 - **HypPlan transfer is real on G24-similar tasks** (graph coloring +7pp over base; constraint satisfaction with sequential decisions resembles G24's "pick op + check constraint" structure).
 - **PT-SFT either underperforms (PQ, GC) or memorizes (BW)**. The best-case PT-SFT (BW 94.5%) is a memorization ceiling, not generalization.
-- **The geometric z signal still doesn't transfer** — across all 4 tasks, `lora + task-z ≤ lora + no-z`. The negative result on the head's z is robust.
+- **The geometric z signal still doesn't transfer** — under a controlled CoT-prompt PQ comparison, `lora-G24 + dense per-step task-z` is 67% vs `lora-G24 no-z` at 74% (−7pp). The negative result on the head's z is robust to prompt format and injection density.
 
 ---
 
@@ -473,13 +475,13 @@ The OOD probes above kept the LoRA frozen on G24-varied and only swapped Stage-1
 
 Cross-baseline numbers are in the consolidated **Headline results** in [README.md](../README.md). This section tracks the per-version progression as we fixed bugs and tuned the trainer:
 
-| Task | v1 (initial DAgger) | v2 (cyclic-pad fix) | v3 (3 rollouts × 4 epochs) |
+| Task | v1 (initial DAgger) | v2 (cyclic-pad fix) | v3 (cyclic-pad + 3 rollouts/problem, 2 epochs) |
 |---|---|---|---|
 | PQ | **75** | 75 | (unchanged) |
-| BW (goal) | 0 | **10** | TBD |
+| BW (goal) | 0 | 10 | **67** |
 | GC | **88** | 88 | (unchanged) |
 
-PQ + GC: clear in-domain wins from v1 onward (+15pp and +27pp over base). BW: this section explains why v1 failed at 0%, how v2 lifted it to 10%, and what v3 is trying.
+PQ + GC: clear in-domain wins from v1 onward (+15pp and +27pp over base). BW: v1 → v3 lifted from 0% → 67% — almost all of the gain came from collecting more `(state, gold-step)` pairs per epoch (cyclic-pad: 80 → 266 pairs; 3 rollouts/problem: 266 → ~1300 pairs).
 
 ### 6.3 Why BW failed in v1 (0/100 solved)
 

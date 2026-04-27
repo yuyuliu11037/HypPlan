@@ -134,13 +134,65 @@ def score_blocksworld_goal_reaching(gen: str, prompt: str) -> tuple[bool, dict]:
     }
 
 
+def score_rulechain(gen: str, record: dict) -> tuple[bool, dict]:
+    """Rule-chaining / synthlogic: succeed iff the generation derives the
+    target predicate via legal forward-chaining steps from the initial facts.
+
+    Reconstructs the rule book from the record, walks the model's emitted
+    steps, and checks whether `target` ends up in state. Tolerates extra
+    steps after the target is derived (early-stop on success)."""
+    from src.oracle_rulechain import (
+        Problem, Rule, applicable_rules, apply_rule, decidable, parse_step,
+    )
+    rules = tuple(
+        Rule(premises=tuple(sorted(r["premises"])), conclusion=r["conclusion"])
+        for r in record["rules"]
+    )
+    problem = Problem(
+        initial_facts=frozenset(record["initial_facts"]),
+        target=record["target"],
+        rules=rules,
+    )
+    state = problem.initial_facts
+    n_legal = 0
+    for line in gen.splitlines():
+        if decidable(state, problem.target):
+            break
+        step = parse_step(line, problem)
+        if step is None:
+            continue
+        # legality: premises in state, conclusion new, and step is in rules
+        if step not in problem.rules:
+            continue
+        if step.conclusion in state:
+            continue
+        if not all(p in state for p in step.premises):
+            continue
+        state = apply_rule(state, step)
+        n_legal += 1
+    ok = decidable(state, problem.target)
+    return ok, {"n_legal_steps": n_legal, "final_state_size": len(state)}
+
+
+def score_clutrr(gen: str, record: dict) -> tuple[bool, dict]:
+    """CLUTRR-like: parse the predicted relation from the generation and
+    compare to the gold answer. Lenient: accepts the relation appearing
+    anywhere in the answer line."""
+    from src.oracle_clutrr import parse_answer, score_answer
+    pred = parse_answer(gen)
+    gold = record["answer"]
+    ok = score_answer(pred, gold)
+    return ok, {"pred": pred, "gold": gold}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True,
                      help="Path or glob to jsonl(s) with 'generation' + 'answer_label'")
     ap.add_argument("--task", required=True,
                      choices=["prontoqa", "blocksworld", "blocksworld_goal",
-                              "graphcolor"])
+                              "graphcolor", "rulechain", "synthlogic",
+                              "clutrr"])
     ap.add_argument("--show_failures", type=int, default=3)
     args = ap.parse_args()
 
@@ -168,7 +220,7 @@ def main():
             ok, _ = score_blocksworld(gen, gold)
         elif args.task == "blocksworld_goal":
             ok, _ = score_blocksworld_goal_reaching(gen, r["prompt"])
-        else:   # graphcolor
+        elif args.task == "graphcolor":
             from src.oracle_graphcolor import (
                 Problem, parse_coloring, score_coloring,
             )
@@ -176,6 +228,10 @@ def main():
                          edges=tuple(map(tuple, r["edges"])))
             coloring = parse_coloring(gen, p)
             ok = score_coloring(p, coloring)
+        elif args.task in ("rulechain", "synthlogic"):
+            ok, _ = score_rulechain(gen, r)
+        else:  # clutrr
+            ok, _ = score_clutrr(gen, r)
         if ok:
             n_correct += 1
         else:

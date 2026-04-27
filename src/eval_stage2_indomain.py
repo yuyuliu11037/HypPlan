@@ -132,6 +132,10 @@ def main():
                 ok = bool(r.solved)
             elif args.task == "gc":
                 ok = bool(r.solved)
+            elif args.task in ("rulechain", "synthlogic", "clutrr"):
+                # All Group B tasks: solved iff adapter.is_solved on
+                # final state. rollout_one already checks this.
+                ok = bool(r.solved)
             if ok:
                 n_correct += 1
             fout.write(json.dumps({

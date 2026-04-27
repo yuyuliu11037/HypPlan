@@ -398,12 +398,16 @@ def main():
             print(f"=== epoch {epoch} done; "
                     f"avg_loss={accum_loss/max(n_loss,1):.4f} ===",
                     flush=True)
+            # Save end-of-epoch checkpoint so an early kill still leaves a
+            # usable model. Final destination is overwritten each epoch.
+            lora_dir = out_dir / "lora"
+            lora_dir.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(lora_dir)
+            torch.save(up_proj.state_dict(), out_dir / "up_projector.pt")
+            print(f"  [epoch {epoch}] saved LoRA + up_projector to {out_dir}",
+                    flush=True)
 
     if rank == 0:
-        lora_dir = out_dir / "lora"
-        lora_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(lora_dir)
-        torch.save(up_proj.state_dict(), out_dir / "up_projector.pt")
         print(f"Saved LoRA + up_projector to {out_dir}", flush=True)
 
     if distributed:

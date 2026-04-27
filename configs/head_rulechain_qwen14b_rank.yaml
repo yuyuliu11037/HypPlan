@@ -1,0 +1,31 @@
+data:
+  pairs_per_tree: 512
+  test_split: test
+  train_split: train
+  tree_dir: data/rulechain_trees_qwen14b
+  val_split: val
+eval:
+  eval_pairs_per_tree: 1024
+  output_dir: results/head_eval/rulechain_qwen14b_rank
+  vis_hyp_dim: 2
+  vis_problems:
+    - 0
+    - 50
+    - 150
+model:
+  base_model: Qwen/Qwen2.5-14B-Instruct
+  head_hidden_dims:
+    - 1024
+    - 256
+  hyp_dim: 32
+  manifold: poincare
+training:
+  epochs: 20
+  log_dir: logs/head_rulechain_qwen14b_rank
+  loss: origin_ranking
+  origin_ranking_margin: 1.0
+  lr: 1.0e-3
+  output_dir: checkpoints/head_rulechain_qwen14b_rank
+  trees_per_batch: 4
+  warmup_ratio: 0.05
+  weight_decay: 1.0e-4

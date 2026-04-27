@@ -118,28 +118,29 @@ To probe whether the G24-trained LoRA transfers to OOD tasks, we run three test 
 
 ### Eval conditions
 
-For each dataset we run four conditions, all sharing the same Stage-2 LoRA checkpoint trained on G24-varied (`checkpoints/dagger_stage2_24_varied_bal_r4/z_s1234`):
+For each dataset we run three baseline conditions on the original test prompt, all sharing the same Stage-2 LoRA checkpoint trained on G24-varied (`checkpoints/dagger_stage2_24_varied_bal_r4/z_s1234`):
 
 | Condition | LoRA | z injection |
 |---|---|---|
 | **base** | off | none |
 | **lora-no-z** | on | none |
 | **lora-rand-z** | on | one Gaussian (norm = √hidden) at start |
-| **lora-task-z** | on | per-task Stage-1 head's z, single-shot at start |
+
+We do not report "task-z on the original test prompt": the original prompts (single-letter for PQ; PDDL action lines for BW; "V_i = color" lines for GC) don't share G24's `Step N: a op b = r. Remaining: …` boundary structure that the LoRA was trained to read z at. To probe whether a meaningful task-specific z helps with a *matched* prompt, we use a CoT-style prompt for PQ/BW/GC — see the CoT-prompt rows in the headline cross-task table.
 
 Per-task Stage-1 heads (one per task; LoRA stays the same): `checkpoints/head_{pronto,blocksworld,graphcolor}_qwen14b_rank/head.pt`. Built per the recipe in [docs/ood_datasets.md § 3](docs/ood_datasets.md). Driver: [src/eval_ood_generic.py](src/eval_ood_generic.py); scorer: [src/score_ood.py](src/score_ood.py); data prep: [data/prepare_ood_evals.py](data/prepare_ood_evals.py).
 
 ### Results
 
-The full numbers (4-condition × 4-task plus PT-SFT, ToT, and Stage-1+2 in-domain) live in the **Headline results** section above. This section explains what the numbers mean.
+The full numbers (cross-task plus PT-SFT, ToT, and Stage-1+2 in-domain) live in the **Headline results** section above. This section explains what the numbers mean.
 
-**Z transfers in-domain, not OOD.** `LoRA-G24 (task-z) > LoRA-G24 (no-z)` only on G24-100 (+3 pp). On PQ/BW/GC, task-z ≤ no-z regardless of injection density. We tested this directly with dense per-step injection on BW + GC: the gap doesn't close (BW 33→36, GC 67→64; see [src/eval_dense_z.py](src/eval_dense_z.py)). Task-structure mismatch, not injection sparsity, is the bottleneck.
+**Dense per-step z does NOT help OOD even with a matched CoT prompt.** On PQ, the controlled comparison `LoRA-G24 + CoT prompt` is 74% no-z vs 67% with dense per-step task-z (−7 pp). The geometric z signal genuinely doesn't transfer.
 
-**The LoRA itself transfers on G24-similar tasks** even without z: GC +7 pp over base (constraint satisfaction with sequential decisions resembles G24's "pick op + check constraint" loop), PQ +3 pp (deductive logic), BW neutral.
+**The LoRA itself transfers on G24-similar tasks** even without z: GC +7 pp over base (constraint satisfaction with sequential decisions resembles G24's "pick op + check constraint" loop), PQ +3 pp (deductive logic), BW neutral. With the CoT prompt, the no-z PQ number jumps to 74% — most of the in-domain gain comes from the prompt change, not from task-specific Stage-2 training.
 
 **Random z is universally harmful.** On every task, `LoRA-G24 + rand-z` is the worst row. The z channel is *active* — uninformed perturbations matter — but uninformed-z degrades output (e.g., on PQ random-z makes the model abandon the "reply with one letter" rule and start free-form explaining; on BW random-z drops 7/100 plans to zero actions).
 
-**Pipelines reproduced.** v1 of these experiments evaluated only `base` / `LoRA-no-z` / `LoRA-rand-z` (no task-specific Stage-1 heads); raw outputs in [results/eval_ood/](results/eval_ood/). v2 added per-task Stage-1 heads (`checkpoints/head_{pronto,blocksworld,graphcolor}_qwen14b_rank/head.pt`) so we have meaningful task-z; outputs in [results/eval_ood_v2/](results/eval_ood_v2/). Goal-reaching scoring (the meaningful BW metric — simulate the model's plan from initial state, check if `goal_facts ⊆ final_state`) is in [src/score_ood.py](src/score_ood.py); the strict exact-match metric drastically under-estimates BW correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).
+**Pipelines reproduced.** v1 of these experiments evaluated only `base` / `LoRA-no-z` / `LoRA-rand-z` (no task-specific Stage-1 heads); raw outputs in [results/eval_ood/](results/eval_ood/). The CoT-prompt PQ comparison lives in [results/eval_pq_dense_z/](results/eval_pq_dense_z/). Goal-reaching scoring (the meaningful BW metric — simulate the model's plan from initial state, check if `goal_facts ⊆ final_state`) is in [src/score_ood.py](src/score_ood.py); the strict exact-match metric drastically under-estimates BW correctness — see [docs/ood_datasets.md § 2 Scoring](docs/ood_datasets.md).
 
 Followups still open:
 - Train the LoRA on a *mixture* of arithmetic + deductive / planning tasks so it actually learns to read z across task types.
@@ -277,22 +278,23 @@ This is the "does the methodology transfer / does it work in-domain on other tas
 | Condition | G24-100 | PQ-100 | BW (goal) | GC-100 |
 |---|---|---|---|---|
 | base (no LoRA, no z) | 11 | 60 | 41 | 61 |
-| LoRA-G24 (no z) | 9 | 63 | 43 | 68 |
-| LoRA-G24 (rand z) | 4 | 43 | 35 | 60 |
-| LoRA-G24 (task z, single-shot) | **12** | 62 | 33 | 67 |
-| LoRA-G24 (task z, dense per-step) | 12 | n/a | 36 | 64 |
-| PT-SFT in-domain (per-task) | 6 | 52.5 | **94.5*** | 64 |
+| LoRA-G24 (no z) — original test prompt | 9 | 63 | 43 | 68 |
+| LoRA-G24 (rand z) — original test prompt | 4 | 43 | 35 | 60 |
+| LoRA-G24 (no z) — CoT prompt | – | 74 | – | – |
+| LoRA-G24 (task z, dense per-step) — CoT prompt | – | 67 | – | – |
+| PT-SFT in-domain (per-task) | 6 | 52.5 | **94.5\*** | 64 |
 | ToT (top-1) | 1 | 41 | 58 | 34 |
 | ToT (any-of-5) | 16 | 44 | 83 | 56 |
-| **HypPlan Stage-1+2 in-domain (per-task)** | – | **75** | 10 | **88** |
+| **HypPlan Stage-1+2 in-domain (per-task)** | 12† | **75** | **67** | **88** |
 
-*PT-SFT BW=94.5% is memorization on PlanBench gold (same distribution as test). Not evidence of compositional planning. See [docs/ood_datasets.md §5](docs/ood_datasets.md#5-planning-tokens-pt-sft-baseline).
+\*PT-SFT BW=94.5% is memorization on PlanBench gold (same distribution as test). Not evidence of compositional planning. See [docs/ood_datasets.md §5](docs/ood_datasets.md#5-planning-tokens-pt-sft-baseline).
+†G24 in-domain Stage-1+2 number is from the varied-target setup (also reported as the in-domain Stage-1+2 line). The fixed-target G24 setup gives 0.55–0.57 in the Game-24 table — different LoRA + different test set.
 
 Reading the table:
-- **Z transfers in-domain, not OOD**: `LoRA-G24 (task-z) > LoRA-G24 (no z)` only on G24 (+3 pp). On PQ/BW/GC, task-z ≤ no-z.
-- **The G24-trained LoRA itself transfers** to G24-similar tasks even without z: GC +7 pp, PQ +3 pp, BW neutral.
+- **Dense per-step z does NOT help PQ even with a matching CoT prompt** — `LoRA-G24 (no z) — CoT prompt` 74% vs `LoRA-G24 (task z, dense per-step) — CoT prompt` 67% (−7 pp). The geometric z signal genuinely doesn't transfer to deductive reasoning.
+- **The G24-trained LoRA itself transfers** to G24-similar tasks even without z: GC +7 pp, PQ +3 pp, BW neutral. The CoT-prompt PQ row (74%) shows the prompt change alone gets most of the in-domain gain — the per-task Stage-1+2 LoRA only adds +1 pp on top.
 - **Random z is universally harmful** — z channel is "active" but uninformed-z degrades output.
-- **Stage-1+2 in-domain training is a strong baseline on PQ/GC** (+15 / +27 pp over base). BW is the open problem; failure analysis in [docs/ood_datasets.md §6](docs/ood_datasets.md#6-hypplan-stage-12-trained-in-domain-per-task).
+- **Stage-1+2 in-domain training wins everywhere** (+15 / +26 / +27 pp over base on PQ / BW / GC). BW jumped 10 → 67 between v2 and v3 once we replaced global-min sync with cyclic-pad and added 3 rollouts/problem. Details in [docs/ood_datasets.md §6](docs/ood_datasets.md#6-hypplan-stage-12-trained-in-domain-per-task).
 
 Ablation details and the stability story behind the `noz-stable` / `z-stable` numbers are in *Experiments* below.
 
