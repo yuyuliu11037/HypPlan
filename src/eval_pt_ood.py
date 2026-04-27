@@ -34,7 +34,7 @@ def build_question(task: str, rec: dict) -> str:
         # SFT was trained with question = format_question(problem)
         return rec["init_state_text"]
     if task in ("rulechain", "synthlogic", "clutrr", "lineq",
-                 "proofwriter"):
+                 "proofwriter", "numpath"):
         # Group B: SFT-PT was trained with question = rec["prompt"]
         # (matches data/annotate_sft_plan_groupB.py).
         return rec["prompt"]
@@ -46,7 +46,7 @@ def main():
     ap.add_argument("--task", required=True,
                      choices=["cd", "bw", "pq", "gc",
                               "rulechain", "synthlogic", "clutrr",
-                              "lineq", "proofwriter"])
+                              "lineq", "proofwriter", "numpath"])
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--lora_adapter", required=True)
     ap.add_argument("--test_data", required=True)
