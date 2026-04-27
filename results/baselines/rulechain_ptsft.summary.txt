@@ -1,0 +1,10 @@
+Scoring 600 records (rulechain)
+  correct: 523/600 = 87.17%
+
+  First 2 failures:
+  --
+  gold: 'Step 1: apply rule: if p10, then p8\nStep 2: apply rule: if p8, then p5\nAnswer: p5 is derived.'
+  gen:  '<PLAN:APPLY> Step 1: apply rule: if p11, then p8\n<PLAN:APPLY> Step 2: apply rule: if p8, then p5\n<PLAN:ANS> Answer: p5 is derived.<|im_end|>'
+  --
+  gold: 'Step 1: apply rule: if p10 and p7, then p3\nStep 2: apply rule: if p11 and p3, then p15\nAnswer: p1
+  gen:  '<code>\nAPPLY rule: if p11 and p7, then p4\nAPPLY rule: if p11 and p4, then p15\nANS:<code>\np15 is derived.<|im_end|>'
