@@ -1,0 +1,2 @@
+Scoring 200 records (clutrr)
+  correct: 200/200 = 100.00%
