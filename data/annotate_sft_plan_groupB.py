@@ -29,6 +29,7 @@ _PLAN_TAGS: dict[str, str] = {
     "clutrr": "<PLAN:COMPOSE>",
     "lineq": "<PLAN:OP>",
     "proofwriter": "<PLAN:APPLY>",
+    "numpath": "<PLAN:OP>",
 }
 
 
