@@ -14,7 +14,7 @@ state transitions.
 | Role | Task | Status |
 |---|---|---|
 | Training source | **24 Game** (varied targets) | existing — Group A v1, kept as-is |
-| OOD #1 (arithmetic / equation) | **Multi-step linear equation solving** | NEW — must construct |
+| OOD #1 (arithmetic / search) | **Number-path** (reachability with fixed op set) | built 2026-04-26 |
 | OOD #2 (planning) | **Blocksworld** | existing — Group A v1 |
 | OOD #3 (CSP) | **Graph Coloring** | existing — Group A v1 |
 
@@ -29,14 +29,21 @@ Tasks involve applying rules over abstract facts to derive new facts.
 | OOD #2 (relational) | **CLUTRR-like** | existing — built in this round, [src/oracle_clutrr.py](../src/oracle_clutrr.py) |
 | OOD #3 (NL proof construction) | **ProofWriter** | NEW — must construct |
 
-### Tasks deleted from the previous plan
+### Tasks tried-and-discarded during plan iteration
 
+- **mini-Sudoku** (4×4 CSP): originally proposed as Group B OOD #3, swapped
+  out before training. Oracle, adapter, configs, and data fully deleted.
+- **Multi-step linear equations**: originally proposed as Group A OOD #1,
+  abandoned after the base 4-bit Qwen-14B-Instruct eval reached **99%**
+  (198/200) — no headroom for the LoRA. Oracle / adapter / scorer / configs
+  / data kept under their `lineq_` names for reference but not used.
+- **Small-scale Countdown** (cd_small, 4 numbers + 2-digit target):
+  considered as a lineq replacement; base 4-bit reached ~10% on 100/200
+  before the run was killed. Functional but Number-path was preferred for
+  the higher base accuracy (~34%) → more measurement room.
 - **synthlogic** (Horn-chaining at higher depth, q-prefixed): NOT in the new
   3-OOD set. Kept as a supplementary depth-OOD probe — same oracle as
-  rulechain, just different generator parameters. Existing data stays for
-  later analysis but isn't part of the headline matrix.
-- **mini-Sudoku**: deleted entirely (oracle, adapter, scorer, configs, data,
-  head checkpoint). No longer relevant to either group.
+  rulechain, just different generator parameters.
 
 ---
 
@@ -80,55 +87,45 @@ Operator pool: `{+, -, ×, ÷}`. Oracle: `src/oracle_24.py` (fixed-target),
 
 **No new construction needed.**
 
-### A2 — Multi-step linear equation solving (NEW OOD #1)
+### A2 — Number-path / reachability (OOD #1)
 
-**Task structure.** Single-variable linear equations of the form
-`a·x + b = c·x + d` with possibly multi-term sides:
-`(a1·x + a2·x + b1) = (c1·x + d1 + d2)`. Solve for `x`.
+**Task structure.** Given a start integer `S`, a target integer `T`, and
+a small fixed set of allowed arithmetic operations (e.g.
+`{+5, +7, ×2, −3}`), find a sequence of operations that transforms `S`
+into `T`. State = single integer; action = one allowed op; goal =
+state == target. The op set is randomized per problem so the model can't
+memorize a fixed procedure.
 
-**Why this fits Group A.** Concrete arithmetic over numerical objects,
-deterministic state transitions, clear gold step decomposition. Sister to
-G24 (both manipulate numerical quantities via four-op arithmetic).
+**Why this fits Group A.** Concrete arithmetic on integers, deterministic
+state transitions, search-heavy because the tree branches over the full
+op set at each state and most paths miss the target. Pairs naturally
+with G24 (same number-manipulation family) but exercises a different
+search shape (single-state-with-op-choice vs G24's pool-shrinking).
 
 **Construction.**
-- **Generator**: pick integer solution `x* ∈ {-9, ..., 9}` and a target
-  difficulty (number of steps `k ∈ {2, 3, 4, 5}`). Build a "fully expanded"
-  equation form with `k` extra simplification operations applied. Example
-  for `x* = 7, k = 3`:
-  - Start: `x = 7`
-  - Add `+5 -5` to RHS: `x = 7 + 5 - 5 = x = 12 - 5`
-  - Multiply both sides by 2: `2x = 2·12 - 2·5 = 2x = 24 - 10`
-  - Move `3x` term: `2x + 3x = 5x` from RHS: `2x - 3x = 24 - 10 - 3x → -x + 3x = 24 - 10` … ⟹ Final: `5x + 4 = 2x + 25`
-- **Oracle interface** (`src/oracle_lineq.py`, NEW):
-  - `Problem(lhs_terms, rhs_terms, solution)` where `lhs_terms`/`rhs_terms`
-    are lists of `(coef_x, const)` pairs.
-  - `applicable_ops(state) -> list[Op]`: per-state legal next steps. Op
-    types:
-    1. `combine_like_terms_lhs` — sum all x-terms and all constants on LHS
-    2. `combine_like_terms_rhs` — same for RHS
-    3. `move_x_to_lhs(coef)` — subtract `coef·x` from both sides
-    4. `move_const_to_rhs(c)` — subtract constant `c` from both sides
-    5. `divide_both_by(coef)` — when both sides have only `coef·x` and a
-       constant, divide
-  - `apply_op(state, op) -> new_state`.
-  - `is_solved(state)`: state is `x = k` form (single x-term coef 1 on
-    LHS, single constant on RHS).
-  - `enumerate_tree(problem)` for Stage-1 head training: BFS over canonical
-    op order (combine → move x → move const → divide).
-- **Difficulty knob**: `k = number of expansion ops` controls number of
-  required simplification steps. OOD eval uses `k ∈ {3, 4, 5}` (training
-  source uses `k ∈ {1, 2, 3}` if we ever need a same-family training set;
-  for Group A's 24-Game training, this isn't needed).
-- **Step rendering**: `Step N: combine like terms on LHS → 5x + 4 = 2x + 25`
-  or `Step N: subtract 2x from both sides → 3x + 4 = 25`.
-- **Scorer** (`score_lineq` in `src/score_ood.py`): parse final
-  `Answer: x = K` and compare to `problem.solution`.
-- **Test set size**: 200 records, 6-way GPU sharded eval.
-- **Generator script**: `data/generate_data_lineq.py`.
-
-**Why integer solutions and integer coefficients**: keeps trees enumerable,
-parsing simple, and matches the abstraction level of G24 (no fractions
-introduced gratuitously).
+- Op vocabulary (`OP_BANK` in `src/oracle_numpath.py`): `{+1, +2, +3, +5,
+  +7, −1, −2, −3, −5, −7, ×2, ×3, ÷2, ÷3}`. Sub must give non-negative
+  result; div must be exact.
+- **Generator** (`generate_problem(target_depth, op_set_size, seed)`):
+  1. Sample `op_set_size` distinct ops from `OP_BANK` (default 4).
+  2. Sample start `S` ∈ [1, 50].
+  3. Random-walk `target_depth` steps from `S` using the chosen op set
+     to obtain a candidate target `T`.
+  4. Verify the BFS minimum distance from `S` to `T` equals
+     `target_depth` (rejects shortcuts).
+- **Oracle interface** (`src/oracle_numpath.py`): standard Tree/Node +
+  `winning_steps(state, problem)` matching the rest of the codebase.
+  `enumerate_tree` does BFS bounded by `max_value=999` and
+  `max_depth=12`.
+- **Difficulty knob**: `target_depth` (number of operations on the
+  shortest path). Test set uses `target_depth ∈ {3, 4, 5}` evenly.
+- **Step rendering**: `Step N: <state_before> <op> <const> = <state_after>`.
+- **Scorer** (`score_numpath` in `src/score_ood.py`): simulate the model's
+  emitted ops from `start`, check final value equals `target`. Each
+  emitted op must be in the allowed set; illegal step terminates the
+  simulation.
+- **Test set size**: 200 records (200 train, 200 val, 2000 train default).
+- **Generator script**: [data/generate_data_numpath.py](../data/generate_data_numpath.py).
 
 ### A3 — Blocksworld (existing OOD #2)
 
@@ -285,31 +282,30 @@ theory matches what the NL story implies.
 
 ---
 
-## Implementation order (Group B first, since training source is ready)
+## Build order (completed)
 
-1. **B4 — ProofWriter import + oracle + adapter + scorer + config.** Smallest
-   net-new effort because we import a public dataset rather than generate.
-2. **A2 — Linear equations oracle + generator + adapter + scorer + config.**
-   Larger effort because we generate from scratch.
-3. **B-train (rulechain Stage-2 LoRA)**: depends only on rulechain Stage-1
-   head, which depends only on rulechain tree-data — both already done /
-   queued. Can train as soon as head is finished.
-4. **B-eval matrix** on PQ / CLUTRR / ProofWriter using the rulechain
-   Stage-2 LoRA.
-5. **A-train (G24 Stage-2 LoRA)** is already trained
-   (`checkpoints/dagger_stage2_24_varied_bal_r4`).
-6. **A-eval matrix** on Linear-Equations / Blocksworld / Graph Coloring
-   using the existing G24 LoRA.
+1. ✅ ProofWriter import + oracle + adapter + scorer + configs.
+2. ✅ Number-path oracle + generator + adapter + scorer + base eval.
+   Selected as Group A OOD #1 over lineq (99% base, no headroom) and
+   cd_small (~10% base, less measurement room).
+3. ✅ rulechain training source built (Horn-clause forward chaining,
+   `pred_prefix` configurable so eval-time vocabulary can differ from
+   training-time).
+4. ✅ CLUTRR-like in-house generator (avoids matplotlib/sacremoses dep
+   weight from the public CLUTRR package; same task structure with
+   controllable hop count k=2/3/4).
+
+## Locked-in decisions (2026-04-26)
+
+- **Number-path** is Group A OOD #1, replacing the originally-proposed
+  Linear Equations (which Qwen-14B 4-bit aces at 99%). Difficulty knob:
+  `target_depth ∈ {3, 4, 5}` BFS shortest-path length, op set size 4,
+  randomized op set per problem.
 
 ---
 
 ## Locked-in decisions (2026-04-26)
 
-- **Linear equations: single-variable only.** Systems of equations are
-  excluded — they introduce a fundamentally different state representation
-  (multiple unknowns, substitution as an action type), so including them
-  would test two things at once. Stay with `a·x + b = c·x + d` form. OOD
-  range: k ∈ {3, 4, 5} expansion steps.
 - **ProofWriter: CWA only.** CWA produces clean True/False labels that
   match the scorer pattern used by ProntoQA, gives directly comparable
   numbers, and avoids the subtleties of Unknown-label inference under OWA.
@@ -338,20 +334,31 @@ Before starting any new training run, confirm:
    PQ, CLUTRR, ProofWriter for Group B; G24, Linear-Eq, BW, GC for Group A
    — though Group A already has G24/BW/GC heads from v1)
 
-## Base few-shot eval — current state
+## Base few-shot eval — final state (2026-04-27)
 
-| Task | Group | Base 4-bit Qwen-14B | Notes |
+All 8 datasets locked in with non-zero base accuracy. Numbers in **bold**
+are 4-bit Qwen-14B-Instruct from this session; non-bold are bf16
+from Group A v1 (HANDOFF.md). 4-bit is a lower bound on bf16, so
+non-zero in 4-bit ⇒ non-zero in bf16.
+
+| Group | Task | Base accuracy | Source |
 |---|---|---|---|
-| 24 Game (G24-100) | A | 11% | from Group A v1 (bf16) |
-| Linear-Equations | A | _pending construction_ | NEW |
-| Blocksworld | A | 41% | from Group A v1 (bf16) |
-| Graph Coloring | A | 61% | from Group A v1 (bf16) |
-| rulechain | B | **53%** | this session, 4-bit on 30 records |
-| ProntoQA | B | 60% | from Group A v1 (bf16) |
-| CLUTRR-like | B | **13%** | this session, 4-bit on 30 records |
-| ProofWriter | B | _pending construction_ | NEW |
+| A | 24 Game (G24-100) | 11% | v1 bf16 |
+| A | **Number-path** | **34.5%** (69/200) | this session, 4-bit, 4-way sharded |
+| A | Blocksworld | 41% | v1 bf16 (goal-reaching) |
+| A | Graph Coloring | 61% | v1 bf16 |
+| B | rulechain | **53%** | this session, 4-bit on 30 records |
+| B | ProntoQA | 60% | v1 bf16 |
+| B | CLUTRR-like | **13%** | this session, 4-bit on 30 records |
+| B | ProofWriter (CWA d3) | **70%** (141/200) | this session, 4-bit |
 
-Two tasks are pending construction; rest already have base accuracies. Once
-the two new tasks are built, run the base eval on those (and re-run any
-existing tasks if we want consistent 4-bit numbers for fairness — but the
-existing bf16 numbers are upper-bound and should suffice).
+Notes:
+- **Number-path was selected** over linear-equations (99% — too easy) and
+  small-scale Countdown (cd_small, ~10% — viable but less measurement
+  room than numpath's 34.5%).
+- ProofWriter is on the high end of the typical headroom range but still
+  has clear room for the LoRA to lift toward the depth-3-only ceiling
+  (~85-90% achievable with explicit reasoning).
+- CLUTRR sits at 13% in 4-bit; bf16 will be modestly higher. The
+  multi-hop composition over kinship terms is genuinely hard for the
+  base model.
