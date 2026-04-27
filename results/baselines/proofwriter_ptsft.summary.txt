@@ -1,10 +1,2 @@
 Scoring 200 records (proofwriter)
-  correct: 79/200 = 39.50%
-
-  First 2 failures:
-  --
-  gold: 'Answer: True'
-  gen:  ' True<|im_end|>'
-  --
-  gold: 'Answer: True'
-  gen:  ' True<|im_end|>'
+  correct: 98/200 = 49.00%

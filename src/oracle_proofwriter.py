@@ -304,13 +304,22 @@ def format_gold_trajectory(problem: Problem) -> str:
 
 
 _ANSWER_RE = re.compile(r"Answer\s*[:\-]?\s*(True|False)\b", re.IGNORECASE)
+_BARE_TF_RE = re.compile(r"^\s*(True|False)\b", re.IGNORECASE)
 
 
 def parse_answer(generation: str) -> Optional[bool]:
+    """Extract True/False from a generation. Two patterns supported:
+      - Adapter chat-style: "...Answer: True" (anywhere in gen)
+      - Bare PT-SFT-style: " True" / " False" right after the prompt
+        (eval_pt_ood.py uses prompt "Question: ...\\nAnswer:" so the
+        completion starts with the bare token)."""
     m = _ANSWER_RE.search(generation)
-    if m is None:
-        return None
-    return m.group(1).lower() == "true"
+    if m is not None:
+        return m.group(1).lower() == "true"
+    m = _BARE_TF_RE.match(generation)
+    if m is not None:
+        return m.group(1).lower() == "true"
+    return None
 
 
 def score_answer(prediction: Optional[bool], gold: bool) -> bool:
