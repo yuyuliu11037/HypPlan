@@ -213,6 +213,9 @@ def score_numpath(gen: str, record: dict) -> tuple[bool, dict]:
             break
     ok = (state == problem.target)
     return ok, {"final": state, "target": problem.target}
+
+
+def score_cd_small(gen: str, record: dict) -> tuple[bool, dict]:
     """Small-scale Countdown: simulate the model's emitted steps from `pool`
     and check whether the final single number equals `target`.
 
