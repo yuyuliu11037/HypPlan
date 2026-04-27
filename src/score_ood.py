@@ -335,9 +335,10 @@ def main():
     ap.add_argument("--input", required=True,
                      help="Path or glob to jsonl(s) with 'generation' + 'answer_label'")
     ap.add_argument("--task", required=True,
-                     choices=["prontoqa", "blocksworld", "blocksworld_goal",
-                              "graphcolor", "rulechain", "synthlogic",
-                              "clutrr", "lineq", "proofwriter"])
+                     choices=["prontoqa", "pq", "blocksworld", "bw",
+                              "blocksworld_goal", "graphcolor", "gc",
+                              "rulechain", "synthlogic", "clutrr",
+                              "lineq", "proofwriter", "numpath", "g24"])
     ap.add_argument("--show_failures", type=int, default=3)
     args = ap.parse_args()
 
@@ -358,14 +359,14 @@ def main():
     failures = []
     for r in records:
         gen = r["generation"]
-        gold = r["answer_label"]
-        if args.task == "prontoqa":
+        gold = r.get("answer_label")
+        if args.task in ("prontoqa", "pq"):
             ok = score_prontoqa(gen, gold)
         elif args.task == "blocksworld":
             ok, _ = score_blocksworld(gen, gold)
-        elif args.task == "blocksworld_goal":
+        elif args.task in ("blocksworld_goal", "bw"):
             ok, _ = score_blocksworld_goal_reaching(gen, r["prompt"])
-        elif args.task == "graphcolor":
+        elif args.task in ("graphcolor", "gc"):
             from src.oracle_graphcolor import (
                 Problem, parse_coloring, score_coloring,
             )
@@ -379,6 +380,10 @@ def main():
             ok, _ = score_clutrr(gen, r)
         elif args.task == "lineq":
             ok, _ = score_lineq(gen, r)
+        elif args.task == "numpath":
+            ok, _ = score_numpath(gen, r)
+        elif args.task == "g24":
+            ok, _ = score_g24(gen, r)
         else:  # proofwriter
             ok, _ = score_proofwriter(gen, r)
         if ok:
