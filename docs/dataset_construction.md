@@ -387,31 +387,39 @@ Same K-sample setup as ToT but with majority-vote aggregation.
 
 ### Planning Token (PT-SFT — Qwen-14B + LoRA SFT'd on planning-token data)
 
-| Group | Task | PT-SFT | Notes |
-|---|---|---|---|
-| A | 24 Game | 6% | v1 |
-| A | Number-path | _pending_ | training in progress |
-| A | Blocksworld | 94.5% | v1 (memorisation of PlanBench gold) |
-| A | Graph Coloring | 64% | v1 |
-| B | rulechain | _pending_ | training in progress |
-| B | ProntoQA | 52.5% | v1 |
-| B | CLUTRR-like | _pending_ | training in progress |
-| B | ProofWriter | _pending_ | training in progress |
+| Group | Task | PT-SFT | Δ vs base | Notes |
+|---|---|---|---|---|
+| A | 24 Game | 6% | −5 | v1 |
+| A | **Number-path** | **44.5%** | **+10** | this session, 2000 train records |
+| A | Blocksworld | 94.5% | +53.5 | v1 (memorisation of PlanBench gold) |
+| A | Graph Coloring | 64% | +3 | v1 |
+| B | **rulechain** | **87.17%** | **+34.2** | this session, 600 record test |
+| B | ProntoQA | 52.5% | −7.5 | v1 (regression) |
+| B | **CLUTRR-like** | **100%** | **+87** | this session, MEMORIZATION CEILING — train+test share the same finite kinship composition table |
+| B | **ProofWriter** | **49%** | **−21** | this session, regression similar to v1 PQ — PT-SFT on proof traces hurts True/False classification |
 
-### Cross-baseline takeaways (preliminary)
+### Cross-baseline takeaways
 
-- **Self-consistency majority** is the cheapest baseline (greedy + K
-  samples + count) and gives consistent +5-25pp lift on 5/8 tasks (BW
-  +19, GC +5, rulechain +25, proofwriter +4, g24 +10), small/zero on
-  the harder tasks (numpath -2.5, clutrr -3, pq +0).
+- **Self-consistency majority** is the cheapest non-trivial baseline
+  (greedy + K samples + count) and gives consistent +5-25pp lift on
+  5/8 tasks (BW +19, GC +5, rulechain +25, proofwriter +4, g24 +10),
+  small/zero on the harder tasks (numpath −2.5, clutrr −3, pq +0).
 - **ToT any-of-5** is the upper-bound search baseline: shows the model
   CAN solve up to 80-89% of rulechain/proofwriter when allowed 5
   attempts. Useful headroom indicator for HypPlan.
-- **CLUTRR is genuinely hard** for 4-bit Qwen-14B (10-14% across all
-  three baselines). Multi-hop kinship composition appears to be a true
-  capability gap.
-- **rulechain ToT shows the largest base→any-of-5 gap** (+27pp), making
-  it a high-value target for the LoRA's transfer story.
+- **PT-SFT splits in two**: dramatic lifts on synthetic-pattern tasks
+  with sufficient training coverage (rulechain +34, BW +53, CLUTRR +87
+  memorisation ceiling, numpath +10) vs. regressions on tasks where
+  the proof-trace format interferes with answer extraction (ProntoQA
+  −7.5, ProofWriter −21). The CLUTRR 100% is a finite-grammar
+  memorisation artefact (train + test share the same composition
+  table); it is not a transfer claim.
+- **CLUTRR is genuinely hard** for 4-bit Qwen-14B at base/SC/ToT
+  (10-14% across all three). The 100% PT-SFT lift is structural, not
+  reasoning-skill — the LoRA learns the kinship rules verbatim.
+- **rulechain ToT shows the largest base→any-of-5 gap** (+27pp), and
+  PT-SFT lifts it +34pp in absolute terms, making it a high-value
+  target for the HypPlan transfer story.
 
 Notes:
 - **Number-path was selected** over linear-equations (99% — too easy) and
