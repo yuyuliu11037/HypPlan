@@ -1,0 +1,2 @@
+Scoring 200 records (numpath)
+  correct: 89/200 = 44.50%
