@@ -265,6 +265,24 @@ def score_numpath(gen: str, record: dict) -> tuple[bool, dict]:
                  "remaining_pool": state}
 
 
+def score_g24(gen: str, record: dict) -> tuple[bool, dict]:
+    """Game-of-24 / cd_small-style: simulate model's emitted ops on the
+    pool, succeed iff the final single number equals 24.
+
+    Two schemas supported:
+      `data/24_test.jsonl`: {"problem": "a,b,c,d", "text": ..., ...} — target=24.
+      `data/24_varied_bal_test.jsonl`: {"pool": [...], "target": int, ...}.
+    """
+    if "pool" in record:
+        return score_cd_small(gen, record)
+    # 24_test.jsonl schema: parse "problem" string into pool, target=24.
+    pool = [int(x) for x in record["problem"].split(",")]
+    rec2 = dict(record)
+    rec2["pool"] = pool
+    rec2["target"] = int(record.get("target", 24))
+    return score_cd_small(gen, rec2)
+
+
 def score_proofwriter(gen: str, record: dict) -> tuple[bool, dict]:
     """ProofWriter (CWA): extract `Answer: True/False` and compare to gold."""
     from src.oracle_proofwriter import parse_answer, score_answer

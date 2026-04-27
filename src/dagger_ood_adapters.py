@@ -889,6 +889,112 @@ class LinearEqAdapter:
         return f"Step {step_num}:"
 
 
+# ---------- Number-path (Group A OOD #1) ----------
+
+
+class NumPathAdapter:
+    name = "numpath"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = ANSWER_RE
+
+    def __init__(self, rec: dict):
+        from src.oracle_numpath import Op, Problem
+        self.rec = rec
+        ops = tuple(Op(o["kind"], int(o["const"])) for o in rec["ops"])
+        self.problem = Problem(
+            start=int(rec["start"]),
+            target=int(rec["target"]),
+            ops=ops,
+            max_value=int(rec.get("max_value", 999)),
+        )
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return self.problem.start
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_numpath import enumerate_tree
+            self._tree = enumerate_tree(self.problem, max_nodes=2000,
+                                         max_depth=12)
+        return self._tree
+
+    def winning_steps(self, state):
+        from src.oracle_numpath import (
+            apply_op, winning_steps as ws,
+        )
+        wins = ws(state, self.problem)
+        out = []
+        for op in wins:
+            ns = apply_op(state, op, self.problem)
+            if ns is not None:
+                out.append((op, ns))
+        return out
+
+    def validate_apply(self, state, action):
+        from src.oracle_numpath import validate_step
+        op, _ = action
+        legal, ns = validate_step(state, op, self.problem)
+        return legal, ns
+
+    def is_solved(self, state):
+        from src.oracle_numpath import is_solved
+        return is_solved(state, self.problem.target)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_numpath import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, state_before, op, state_after):
+        from src.oracle_numpath import format_step_text
+        return format_step_text(state_before, op, state_after, 0)
+
+    def parse_step(self, step_body: str, state, history):
+        from src.oracle_numpath import parse_step
+        out = parse_step(step_body, self.problem, state)
+        if out is None:
+            return None
+        op, ns = out
+        return ((op, ns), step_body.strip())
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        op, _ = action
+        body = self._action_text(state_before, op, state_after)
+        if self.is_solved(state_after):
+            return f" {body}. Answer: {self.problem.target}"
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve a number-path puzzle. Apply operations from "
+                "the given set to transform the start number into the "
+                "target. Each step uses one operation. Output format:\n"
+                "  Step 1: a op b = r\n"
+                "  Step 2: r op b = s\n"
+                "  ...\n"
+                "  Answer: <target>\n"
+                "Subtraction must give a non-negative result. Division "
+                "must be exact. The current value is the LHS of each step.")
+        from src.oracle_numpath import format_question
+        user = format_question(self.problem)
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        return f"Step {step_num}:"
+
+
 # ---------- ProofWriter (CWA depth-3, NL deductive proof) ----------
 
 
@@ -1013,5 +1119,6 @@ ADAPTERS = {
     "synthlogic": SynthlogicAdapter,
     "clutrr": CLUTRRAdapter,
     "lineq": LinearEqAdapter,
+    "numpath": NumPathAdapter,
     "proofwriter": ProofWriterAdapter,
 }
