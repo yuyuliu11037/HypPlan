@@ -16,16 +16,31 @@ from pathlib import Path
 
 
 def score_prontoqa(gen: str, gold: str) -> bool:
-    g = gen.strip().splitlines()[0] if gen.strip() else ""
-    # try direct letter
-    m = re.search(r"\b([AB])\b", g)
+    """Find the model's claimed A/B/True/False answer.
+
+    Two output styles supported:
+      - Adapter-style chain-of-thought ending with "Answer: A" or "Answer: B"
+        (what `ProntoQAAdapter.make_prompt` elicits — used by ToT/SC).
+      - Single-letter response "A" / "B" or "True" / "False" (what the v1
+        `eval_ood_generic.py --mode base` few-shot prompt elicits).
+    """
+    g = gen.strip()
+    # Adapter style: scan for explicit Answer line.
+    m = re.search(r"Answer\s*[:\-]?\s*([AB])\b", g, re.IGNORECASE)
+    if m:
+        return m.group(1).upper() == gold
+    m = re.search(r"Answer\s*[:\-]?\s*(True|False)\b", g, re.IGNORECASE)
+    if m:
+        return ("A" == gold) if m.group(1).lower() == "true" else ("B" == gold)
+    # First-line single-letter response (legacy).
+    first_line = g.splitlines()[0] if g else ""
+    m = re.search(r"\b([AB])\b", first_line)
     if m:
         return m.group(1) == gold
-    # try true/false
-    g_lower = g.lower()
-    if "true" in g_lower and "false" not in g_lower:
+    fl = first_line.lower()
+    if "true" in fl and "false" not in fl:
         return gold == "A"
-    if "false" in g_lower and "true" not in g_lower:
+    if "false" in fl and "true" not in fl:
         return gold == "B"
     return False
 
