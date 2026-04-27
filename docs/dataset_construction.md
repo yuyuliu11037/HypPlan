@@ -334,23 +334,84 @@ Before starting any new training run, confirm:
    PQ, CLUTRR, ProofWriter for Group B; G24, Linear-Eq, BW, GC for Group A
    — though Group A already has G24/BW/GC heads from v1)
 
-## Base few-shot eval — final state (2026-04-27)
+## Baseline results — final state (2026-04-27)
 
-All 8 datasets locked in with non-zero base accuracy. Numbers in **bold**
-are 4-bit Qwen-14B-Instruct from this session; non-bold are bf16
-from Group A v1 (HANDOFF.md). 4-bit is a lower bound on bf16, so
-non-zero in 4-bit ⇒ non-zero in bf16.
+All 8 datasets locked in. Numbers in **bold** are 4-bit Qwen-14B-Instruct
+runs from this session; non-bold are bf16 from Group A v1 (HANDOFF.md).
+4-bit is a lower bound on bf16, so non-zero in 4-bit ⇒ non-zero in bf16.
 
-| Group | Task | Base accuracy | Source |
+### Base (greedy) accuracy
+
+| Group | Task | Base | Notes |
 |---|---|---|---|
-| A | 24 Game (G24-100) | 11% | v1 bf16 |
-| A | **Number-path** | **34.5%** (69/200) | this session, 4-bit, 4-way sharded |
+| A | 24 Game | 11% | v1 bf16 (G24-100) |
+| A | **Number-path** | **34.5%** | this session, 4-bit, 200 records |
 | A | Blocksworld | 41% | v1 bf16 (goal-reaching) |
 | A | Graph Coloring | 61% | v1 bf16 |
-| B | rulechain | **53%** | this session, 4-bit on 30 records |
+| B | **rulechain** | **53%** | this session, 4-bit, 30 records |
 | B | ProntoQA | 60% | v1 bf16 |
-| B | CLUTRR-like | **13%** | this session, 4-bit on 30 records |
-| B | ProofWriter (CWA d3) | **70%** (141/200) | this session, 4-bit |
+| B | **CLUTRR-like** | **13%** | this session, 4-bit, 30 records |
+| B | **ProofWriter** (CWA d3) | **70%** | this session, 4-bit, 200 records |
+
+### Tree of Thoughts (K=5, temp=0.7, top-1 / any-of-5)
+
+Structured chat-prompt with `Step 1:` priming. The "top-1" greedy uses
+the same structured prompt; "any-of-5" reports correct iff any of K=5
+sampled rollouts solves the problem.
+
+| Group | Task | top-1 | any-of-5 | n |
+|---|---|---|---|---|
+| A | 24 Game | 10% | 20% | 100 |
+| A | **Number-path** | **32%** | **40%** | 200 |
+| A | Blocksworld | 58% | 83% | v1, 100 |
+| A | Graph Coloring | 34% | 56% | v1, 100 |
+| B | **rulechain** | **52%** | **80%** | 600 |
+| B | ProntoQA | 41% | 44% | v1, 100 |
+| B | **CLUTRR-like** | **10%** | **14%** | 200 |
+| B | **ProofWriter** | **69%** | **89%** | 200 |
+
+### Self-Consistency (K=5, temp=0.7, any-of-5 / majority-vote)
+
+Same K-sample setup as ToT but with majority-vote aggregation.
+
+| Group | Task | any-of-5 | majority | n |
+|---|---|---|---|---|
+| A | 24 Game | **21%** | **21%** | 100 |
+| A | Number-path | **42%** | **32%** | 200 |
+| A | Blocksworld | **76%** | **60%** | 200 |
+| A | Graph Coloring | **80%** | **66%** | 200 |
+| B | rulechain | **82%** | **78%** | 200 |
+| B | ProntoQA | **60%** | **58%** | 200 |
+| B | CLUTRR-like | **14%** | **10%** | 200 |
+| B | ProofWriter | **88%** | **74%** | 200 |
+
+### Planning Token (PT-SFT — Qwen-14B + LoRA SFT'd on planning-token data)
+
+| Group | Task | PT-SFT | Notes |
+|---|---|---|---|
+| A | 24 Game | 6% | v1 |
+| A | Number-path | _pending_ | training in progress |
+| A | Blocksworld | 94.5% | v1 (memorisation of PlanBench gold) |
+| A | Graph Coloring | 64% | v1 |
+| B | rulechain | _pending_ | training in progress |
+| B | ProntoQA | 52.5% | v1 |
+| B | CLUTRR-like | _pending_ | training in progress |
+| B | ProofWriter | _pending_ | training in progress |
+
+### Cross-baseline takeaways (preliminary)
+
+- **Self-consistency majority** is the cheapest baseline (greedy + K
+  samples + count) and gives consistent +5-25pp lift on 5/8 tasks (BW
+  +19, GC +5, rulechain +25, proofwriter +4, g24 +10), small/zero on
+  the harder tasks (numpath -2.5, clutrr -3, pq +0).
+- **ToT any-of-5** is the upper-bound search baseline: shows the model
+  CAN solve up to 80-89% of rulechain/proofwriter when allowed 5
+  attempts. Useful headroom indicator for HypPlan.
+- **CLUTRR is genuinely hard** for 4-bit Qwen-14B (10-14% across all
+  three baselines). Multi-hop kinship composition appears to be a true
+  capability gap.
+- **rulechain ToT shows the largest base→any-of-5 gap** (+27pp), making
+  it a high-value target for the LoRA's transfer story.
 
 Notes:
 - **Number-path was selected** over linear-equations (99% — too easy) and
