@@ -353,37 +353,41 @@ runs from this session; non-bold are bf16 from Group A v1 (HANDOFF.md).
 | B | **CLUTRR-like** | **13%** | this session, 4-bit, 30 records |
 | B | **ProofWriter** (CWA d3) | **70%** | this session, 4-bit, 200 records |
 
-### Tree of Thoughts (K=5, temp=0.7, top-1 / any-of-5)
+### Tree of Thoughts (K=5, temp=0.7, top-1 greedy)
 
-Structured chat-prompt with `Step 1:` priming. The "top-1" greedy uses
-the same structured prompt; "any-of-5" reports correct iff any of K=5
-sampled rollouts solves the problem.
+Structured chat-prompt with `Step 1:` priming. Reports top-1 (single
+greedy rollout under the structured prompt). The K=5 sampled
+trajectories were generated for completeness but the lenient any-of-K
+metric requires the gold label to select the "right" one and so isn't
+a deployable baseline; we don't report it.
 
-| Group | Task | top-1 | any-of-5 | n |
-|---|---|---|---|---|
-| A | 24 Game | 10% | 20% | 100 |
-| A | **Number-path** | **32%** | **40%** | 200 |
-| A | Blocksworld | 58% | 83% | v1, 100 |
-| A | Graph Coloring | 34% | 56% | v1, 100 |
-| B | **rulechain** | **52%** | **80%** | 600 |
-| B | ProntoQA | 41% | 44% | v1, 100 |
-| B | **CLUTRR-like** | **10%** | **14%** | 200 |
-| B | **ProofWriter** | **69%** | **89%** | 200 |
+| Group | Task | top-1 | n |
+|---|---|---|---|
+| A | 24 Game | 10% | 100 |
+| A | **Number-path** | **32%** | 200 |
+| A | Blocksworld | 58% | v1, 100 |
+| A | Graph Coloring | 34% | v1, 100 |
+| B | **rulechain** | **52%** | 600 |
+| B | ProntoQA | 41% | v1, 100 |
+| B | **CLUTRR-like** | **10%** | 200 |
+| B | **ProofWriter** | **69%** | 200 |
 
-### Self-Consistency (K=5, temp=0.7, any-of-5 / majority-vote)
+### Self-Consistency (K=5, temp=0.7, majority-vote)
 
-Same K-sample setup as ToT but with majority-vote aggregation.
+Same K-sample setup as ToT but with majority-vote aggregation
+(canonical Wang et al. 2023). This is the deployable baseline: pick
+the answer that appears most often across the K samples.
 
-| Group | Task | any-of-5 | majority | n |
-|---|---|---|---|---|
-| A | 24 Game | **21%** | **21%** | 100 |
-| A | Number-path | **42%** | **32%** | 200 |
-| A | Blocksworld | **76%** | **60%** | 200 |
-| A | Graph Coloring | **80%** | **66%** | 200 |
-| B | rulechain | **82%** | **78%** | 200 |
-| B | ProntoQA | **60%** | **58%** | 200 |
-| B | CLUTRR-like | **14%** | **10%** | 200 |
-| B | ProofWriter | **88%** | **74%** | 200 |
+| Group | Task | majority | n |
+|---|---|---|---|
+| A | 24 Game | **21%** | 100 |
+| A | Number-path | **32%** | 200 |
+| A | Blocksworld | **60%** | 200 |
+| A | Graph Coloring | **66%** | 200 |
+| B | rulechain | **78%** | 200 |
+| B | ProntoQA | **58%** | 200 |
+| B | CLUTRR-like | **10%** | 200 |
+| B | ProofWriter | **74%** | 200 |
 
 ### Planning Token (PT-SFT — Qwen-14B + LoRA SFT'd on planning-token data)
 
@@ -401,25 +405,24 @@ Same K-sample setup as ToT but with majority-vote aggregation.
 ### Cross-baseline takeaways
 
 - **Self-consistency majority** is the cheapest non-trivial baseline
-  (greedy + K samples + count) and gives consistent +5-25pp lift on
-  5/8 tasks (BW +19, GC +5, rulechain +25, proofwriter +4, g24 +10),
-  small/zero on the harder tasks (numpath −2.5, clutrr −3, pq +0).
-- **ToT any-of-5** is the upper-bound search baseline: shows the model
-  CAN solve up to 80-89% of rulechain/proofwriter when allowed 5
-  attempts. Useful headroom indicator for HypPlan.
-- **PT-SFT splits in two**: dramatic lifts on synthetic-pattern tasks
-  with sufficient training coverage (rulechain +34, BW +53, CLUTRR +87
-  memorisation ceiling, numpath +10) vs. regressions on tasks where
-  the proof-trace format interferes with answer extraction (ProntoQA
-  −7.5, ProofWriter −21). The CLUTRR 100% is a finite-grammar
-  memorisation artefact (train + test share the same composition
-  table); it is not a transfer claim.
-- **CLUTRR is genuinely hard** for 4-bit Qwen-14B at base/SC/ToT
+  (greedy + K samples + count). On 5/8 tasks it gives a consistent
+  +5-25pp lift over base (BW +19, GC +5, rulechain +25, proofwriter
+  +4, g24 +10); on the other 3 it's small/zero (numpath −2.5,
+  clutrr −3, pq −2).
+- **PT-SFT splits in two**: dramatic lifts on tasks where training
+  patterns generalise to test (rulechain +34, BW +53, numpath +10)
+  vs. regressions where the proof-trace format interferes with
+  answer extraction (ProntoQA −7.5, ProofWriter −21). The CLUTRR
+  100% is a finite-grammar memorisation artefact (train + test share
+  the same composition table); it is not a transfer claim, similar
+  to v1 BW PT-SFT 94.5% memorising PlanBench gold.
+- **CLUTRR is genuinely hard** for 4-bit Qwen-14B at base / SC / ToT
   (10-14% across all three). The 100% PT-SFT lift is structural, not
-  reasoning-skill — the LoRA learns the kinship rules verbatim.
-- **rulechain ToT shows the largest base→any-of-5 gap** (+27pp), and
-  PT-SFT lifts it +34pp in absolute terms, making it a high-value
-  target for the HypPlan transfer story.
+  reasoning-skill — the LoRA learns the kinship composition table
+  verbatim.
+- **rulechain has the strongest baseline lifts** across SC (+25pp)
+  and PT-SFT (+34pp), making it a high-value target for the HypPlan
+  transfer story.
 
 Notes:
 - **Number-path was selected** over linear-equations (99% — too easy) and

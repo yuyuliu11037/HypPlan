@@ -1,13 +1,16 @@
-"""K-path baseline runner for ToT (any-of-K) and Self-Consistency (majority).
+"""K-path baseline runner for ToT (top-1) and Self-Consistency (majority).
 
 For each problem, samples K independent rollouts at temperature `temp`,
 scores each with the task scorer, and aggregates:
 
-- `--mode tot`: report `top1` (1 greedy rollout, temp=0) AND
-  `any_of_K` (correct iff any of K rollouts solves the problem). This is
-  the ToT-BFS shape used in the v1 HANDOFF table for PQ/BW/GC.
+- `--mode tot`: report `top1` (1 greedy rollout, temp=0) under the
+  task adapter's structured Step-1 priming prompt. K=5 sampled
+  trajectories are also generated and saved in the per-record JSONL
+  for audit, but the lenient "any-of-K" oracle metric is NOT reported
+  as a baseline (you'd need the gold label to pick the right one of
+  K samples — not deployable).
 - `--mode sc`: report `majority` (majority vote over K rollouts at
-  temp>0). Self-consistency à la Wang et al. 2023.
+  temp>0). Canonical Self-Consistency (Wang et al. 2023).
 - `--mode greedy`: just top1 (1 greedy rollout). Same as base eval but
   using the task adapter's rollout prompt.
 
@@ -290,8 +293,6 @@ def main():
                 msg = f"  [r{args.shard_rank}] {i+1}/{len(records)} "
                 if args.mode in ("greedy", "tot"):
                     msg += f"top1={n_top1/(i+1):.0%} "
-                if args.mode in ("tot", "sc"):
-                    msg += f"any={n_any/(i+1):.0%} "
                 if args.mode == "sc":
                     msg += f"maj={n_majority/(i+1):.0%} "
                 msg += f"rate={rate:.2f}/s"
@@ -303,8 +304,6 @@ def main():
           f"({elapsed:.0f}s):")
     if args.mode in ("greedy", "tot"):
         print(f"  top1: {n_top1}/{n} = {n_top1/n:.0%}")
-    if args.mode in ("tot", "sc"):
-        print(f"  any:  {n_any}/{n} = {n_any/n:.0%}")
     if args.mode == "sc":
         print(f"  maj:  {n_majority}/{n} = {n_majority/n:.0%}")
 

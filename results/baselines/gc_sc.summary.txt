@@ -1,3 +1,2 @@
 task=gc mode=sc n=200
-  any-of-K: 159/200 = 80%
   majority: 133/200 = 66%

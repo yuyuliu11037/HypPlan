@@ -67,13 +67,10 @@ import json
 records = [json.loads(l) for l in open("$OUT_PATH")]
 n = len(records)
 top1 = sum(1 for r in records if r.get("top1_ok"))
-any_ok = sum(1 for r in records if r.get("any_ok"))
 maj = sum(1 for r in records if r.get("majority_ok"))
 print(f"task=${TASK} mode=${MODE} n={n}")
 if any(r.get("top1_gen") is not None for r in records):
     print(f"  top1: {top1}/{n} = {top1/n:.0%}")
-if any(r.get("any_ok") is not None for r in records):
-    print(f"  any-of-K: {any_ok}/{n} = {any_ok/n:.0%}")
 if "$MODE" == "sc":
     print(f"  majority: {maj}/{n} = {maj/n:.0%}")
 PY

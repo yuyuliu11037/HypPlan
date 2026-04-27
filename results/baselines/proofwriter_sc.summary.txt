@@ -1,3 +1,2 @@
 task=proofwriter mode=sc n=200
-  any-of-K: 176/200 = 88%
   majority: 148/200 = 74%

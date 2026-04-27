@@ -216,16 +216,16 @@ Final group composition:
 All 3 × 8 baseline cells run, per-cell results committed under
 `results/baselines/{task}_{mode}.jsonl` + `.summary.txt`.
 
-| Task | Base | ToT top-1 | ToT any-5 | SC any-5 | SC maj | PT-SFT |
-|---|---|---|---|---|---|---|
-| 24 Game | 11% | 10% | 20% | 21% | 21% | 6% |
-| Number-path | 34.5% | 32% | 40% | 42% | 32% | **44.5%** |
-| Blocksworld | 41% | 58% | 83% | 76% | 60% | 94.5% |
-| Graph Coloring | 61% | 34% | 56% | 80% | 66% | 64% |
-| rule-chaining | 53% | 52% | 80% | 82% | 78% | **87.2%** |
-| ProntoQA | 60% | 41% | 44% | 60% | 58% | 52.5% |
-| CLUTRR-like | 13% | 10% | 14% | 14% | 10% | **100%** ⁂ |
-| ProofWriter | 70% | 69% | 89% | 88% | 74% | 49% |
+| Task | Base | ToT (top-1) | SC (majority) | PT-SFT |
+|---|---|---|---|---|
+| 24 Game | 11% | 10% | 21% | 6% |
+| Number-path | 34.5% | 32% | 32% | **44.5%** |
+| Blocksworld | 41% | 58% | 60% | 94.5% |
+| Graph Coloring | 61% | 34% | 66% | 64% |
+| rule-chaining | 53% | 52% | 78% | **87.2%** |
+| ProntoQA | 60% | 41% | 58% | 52.5% |
+| CLUTRR-like | 13% | 10% | 10% | **100%** ⁂ |
+| ProofWriter | 70% | 69% | 74% | 49% |
 
 ⁂ CLUTRR PT-SFT 100% is a memorisation ceiling — train + test share
 the same finite kinship composition table; not a generalisation claim
@@ -237,9 +237,12 @@ Caveats:
   are bf16. 4-bit is a lower bound on bf16.
 - ToT is *not* the v1 propose+value tot_ood.py for the new tasks
   (which would require new ToT-specific adapters per task). It is a
-  K=5 sampled-rollout runner using the dagger_ood adapter prompts;
-  reported `top-1` is a single greedy rollout under the same
-  structured prompt, `any-of-5` is "any of 5 samples solves".
+  single greedy rollout under the dagger_ood adapter's structured
+  Step-1 priming prompt — i.e. structured CoT, not the full Yao et al.
+  branch-pruning ToT. We sampled K=5 trajectories alongside (saved in
+  the per-cell jsonls) but the lenient any-of-K metric requires the
+  gold label to select the right sample, so we don't report it.
+- SC reports majority vote (canonical Wang et al. 2023 Self-Consistency).
 - rulechain test set is 600 records (vs the 200-record OOD norm)
   because rulechain is the training source and reuses the same test
   generator. SC was capped to 200 via `--limit 200`; ToT and PT-SFT
