@@ -1,0 +1,3 @@
+task=numpath mode=sc n=200
+  any-of-K: 84/200 = 42%
+  majority: 65/200 = 32%
