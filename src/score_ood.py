@@ -174,6 +174,115 @@ def score_rulechain(gen: str, record: dict) -> tuple[bool, dict]:
     return ok, {"n_legal_steps": n_legal, "final_state_size": len(state)}
 
 
+def score_numpath(gen: str, record: dict) -> tuple[bool, dict]:
+    """Number-path: simulate the model's emitted ops from `start` and check
+    whether the final value equals `target`. Each op must be in the
+    allowed set."""
+    from src.oracle_numpath import Op, Problem
+    ops = tuple(Op(o["kind"], int(o["const"])) for o in record["ops"])
+    problem = Problem(start=int(record["start"]),
+                      target=int(record["target"]),
+                      ops=ops,
+                      max_value=int(record.get("max_value", 999)))
+    state = problem.start
+    step_re = re.compile(
+        r"(\d+)\s*([\+\-\*xX/])\s*(\d+)\s*=\s*(-?\d+)", re.IGNORECASE
+    )
+    last_value = state
+    for line in gen.splitlines():
+        m = step_re.search(line)
+        if m is None:
+            continue
+        a = int(m.group(1)); sym = m.group(2).lower(); b = int(m.group(3))
+        r = int(m.group(4))
+        if a != state:
+            break
+        kind = {"+": "ADD", "-": "SUB", "*": "MUL", "x": "MUL",
+                "/": "DIV"}.get(sym)
+        if kind is None:
+            break
+        op = Op(kind=kind, const=b)
+        if op not in problem.ops:
+            break
+        ns = op.apply(state, problem.max_value)
+        if ns is None or ns != r:
+            break
+        state = ns
+        last_value = state
+        if state == problem.target:
+            break
+    ok = (state == problem.target)
+    return ok, {"final": state, "target": problem.target}
+    """Small-scale Countdown: simulate the model's emitted steps from `pool`
+    and check whether the final single number equals `target`.
+
+    Lenient parsing: matches lines of the form "a op b = r" where op is
+    +, -, *, /, x, X. Uses each operand at most once per step. Stops on the
+    first illegal step or when only one number remains."""
+    pool = list(record["pool"])
+    target = int(record["target"])
+
+    step_re = re.compile(
+        r"(\d+)\s*([\+\-\*xX/])\s*(\d+)\s*=\s*(-?\d+)", re.IGNORECASE
+    )
+    state = pool[:]
+    last_value = None
+    for line in gen.splitlines():
+        m = step_re.search(line)
+        if m is None:
+            continue
+        a = int(m.group(1)); op = m.group(2).lower(); b = int(m.group(3))
+        r = int(m.group(4))
+        if op in ("x",): op = "*"
+        # legality: both operands must be in current state
+        try:
+            ai = state.index(a)
+            tmp = list(state); tmp.pop(ai)
+            bi = tmp.index(b)
+        except ValueError:
+            break
+        if op == "+":
+            r_chk = a + b
+        elif op == "-":
+            r_chk = a - b
+        elif op == "*":
+            r_chk = a * b
+        elif op == "/":
+            if b == 0 or a % b != 0:
+                break
+            r_chk = a // b
+        else:
+            break
+        if r_chk != r:
+            break
+        # Apply: remove a and b, add r
+        state.remove(a); state.remove(b); state.append(r)
+        last_value = r
+
+    final_value = state[0] if len(state) == 1 else last_value
+    ok = final_value is not None and final_value == target
+    return ok, {"final": final_value, "target": target,
+                 "remaining_pool": state}
+
+
+def score_proofwriter(gen: str, record: dict) -> tuple[bool, dict]:
+    """ProofWriter (CWA): extract `Answer: True/False` and compare to gold."""
+    from src.oracle_proofwriter import parse_answer, score_answer
+    pred = parse_answer(gen)
+    gold = bool(record["answer"])
+    ok = score_answer(pred, gold)
+    return ok, {"pred": pred, "gold": gold}
+
+
+def score_lineq(gen: str, record: dict) -> tuple[bool, dict]:
+    """Linear equations: extract `Answer: x = K` and compare to gold int."""
+    from src.oracle_lineq import parse_answer, score_answer
+    pred = parse_answer(gen)
+    gold = int(record["solution"])
+    ok = score_answer(pred, gold)
+    return ok, {"pred": pred, "gold": gold}
+
+
 def score_clutrr(gen: str, record: dict) -> tuple[bool, dict]:
     """CLUTRR-like: parse the predicted relation from the generation and
     compare to the gold answer. Lenient: accepts the relation appearing
@@ -192,7 +301,7 @@ def main():
     ap.add_argument("--task", required=True,
                      choices=["prontoqa", "blocksworld", "blocksworld_goal",
                               "graphcolor", "rulechain", "synthlogic",
-                              "clutrr"])
+                              "clutrr", "lineq", "proofwriter"])
     ap.add_argument("--show_failures", type=int, default=3)
     args = ap.parse_args()
 
@@ -230,8 +339,12 @@ def main():
             ok = score_coloring(p, coloring)
         elif args.task in ("rulechain", "synthlogic"):
             ok, _ = score_rulechain(gen, r)
-        else:  # clutrr
+        elif args.task == "clutrr":
             ok, _ = score_clutrr(gen, r)
+        elif args.task == "lineq":
+            ok, _ = score_lineq(gen, r)
+        else:  # proofwriter
+            ok, _ = score_proofwriter(gen, r)
         if ok:
             n_correct += 1
         else:

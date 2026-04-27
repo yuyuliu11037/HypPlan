@@ -44,7 +44,8 @@ def main():
                      help="For lora_taskz: task-specific Stage-1 head .pt")
     ap.add_argument("--task", default=None,
                      choices=["prontoqa", "blocksworld", "graphcolor",
-                              "rulechain", "synthlogic", "clutrr"],
+                              "rulechain", "synthlogic", "clutrr",
+                              "lineq", "proofwriter"],
                      help="For lora_taskz: which task's state renderer to use.")
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--test_data", required=True)
@@ -112,7 +113,8 @@ def main():
         elif args.task == "graphcolor":
             def state_renderer(rec):
                 return rec["init_state_text"]
-        elif args.task in ("rulechain", "synthlogic", "clutrr"):
+        elif args.task in ("rulechain", "synthlogic", "clutrr", "lineq",
+                            "proofwriter"):
             # All Group B tasks include the rendered initial state in the
             # JSONL record under `init_state_text`, mirroring the PQ/GC
             # convention.

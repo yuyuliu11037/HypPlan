@@ -303,15 +303,55 @@ theory matches what the NL story implies.
 
 ---
 
-## Things to confirm before generating
+## Locked-in decisions (2026-04-26)
 
-- **Linear-equations difficulty knobs.** Is k ∈ {3,4,5} the right OOD range
-  for a "comfortably hard" probe? Should we include systems of equations
-  too, or stay with single-variable?
-- **ProofWriter variant.** CWA depth-3 is the recommendation. Should we
-  also include OWA for an Unknown-label probe? Single variant or both?
-- **Number of test records** per task. Standard is 100-200. Confirm 200
-  for both new tasks.
-- **Whether to keep synthlogic data** as a supplementary depth-OOD probe
-  alongside the new 3-OOD set, or fully delete it. (Currently kept,
-  partially generated.)
+- **Linear equations: single-variable only.** Systems of equations are
+  excluded — they introduce a fundamentally different state representation
+  (multiple unknowns, substitution as an action type), so including them
+  would test two things at once. Stay with `a·x + b = c·x + d` form. OOD
+  range: k ∈ {3, 4, 5} expansion steps.
+- **ProofWriter: CWA only.** CWA produces clean True/False labels that
+  match the scorer pattern used by ProntoQA, gives directly comparable
+  numbers, and avoids the subtleties of Unknown-label inference under OWA.
+  This matches the standard ProofWriter benchmark configuration in
+  published work. Use depth-3 split, 200 records.
+- **Base few-shot eval is mandatory before training every dataset.** Run
+  4-bit Qwen-14B-Instruct on the test split for all 8 tasks (4 Group A +
+  4 Group B). Any task at 0% (or near-zero) accuracy is a candidate for
+  substitution or difficulty adjustment before we commit GPU-hours to
+  training.
+- **Test set size**: 200 records per OOD task, 100 records for the
+  in-domain training-source eval (matches Group A v1 convention).
+- **synthlogic data**: kept as a supplementary depth-OOD probe (same
+  oracle as rulechain, just different generator parameters) but not in
+  the headline 3-OOD set. Existing partial data stays.
+
+## Pre-training checklist
+
+Before starting any new training run, confirm:
+
+1. ✅ All 8 oracles + adapters + scorers + configs in place
+2. ✅ All 8 test JSONL files present and gold-trajectories scoring 100%
+3. ⏳ Base few-shot eval run on all 8 tasks; results documented
+4. ⏳ No task with 0% base accuracy (substitute or adjust if any)
+5. ⏳ Tree-data caches built for all 4 Stage-1 head tasks (rulechain,
+   PQ, CLUTRR, ProofWriter for Group B; G24, Linear-Eq, BW, GC for Group A
+   — though Group A already has G24/BW/GC heads from v1)
+
+## Base few-shot eval — current state
+
+| Task | Group | Base 4-bit Qwen-14B | Notes |
+|---|---|---|---|
+| 24 Game (G24-100) | A | 11% | from Group A v1 (bf16) |
+| Linear-Equations | A | _pending construction_ | NEW |
+| Blocksworld | A | 41% | from Group A v1 (bf16) |
+| Graph Coloring | A | 61% | from Group A v1 (bf16) |
+| rulechain | B | **53%** | this session, 4-bit on 30 records |
+| ProntoQA | B | 60% | from Group A v1 (bf16) |
+| CLUTRR-like | B | **13%** | this session, 4-bit on 30 records |
+| ProofWriter | B | _pending construction_ | NEW |
+
+Two tasks are pending construction; rest already have base accuracies. Once
+the two new tasks are built, run the base eval on those (and re-run any
+existing tasks if we want consistent 4-bit numbers for fairness — but the
+existing bf16 numbers are upper-bound and should suffice).

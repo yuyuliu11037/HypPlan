@@ -1,0 +1,18 @@
+model:
+  base_model: "Qwen/Qwen2.5-14B-Instruct"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+data:
+  train_data: "data/proofwriter_train_sft_plan.jsonl"
+  max_seq_len: 1024
+training:
+  lr: 1.0e-4
+  epochs: 5
+  batch_size: 2
+  grad_accum: 8
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  grad_clip: 1.0
+  output_dir: "checkpoints/sft_pt_proofwriter_qwen14b"

@@ -774,10 +774,244 @@ class CLUTRRAdapter:
         return f"Step {step_num}:"
 
 
+# ---------- Linear Equations (Group A OOD #1) ----------
+
+
+class LinearEqAdapter:
+    name = "lineq"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = ANSWER_RE
+
+    def __init__(self, rec: dict):
+        from src.oracle_lineq import Problem, State
+        self.rec = rec
+        init = rec["initial"]
+        self.problem = Problem(
+            initial=State(
+                lhs_x=tuple(init["lhs_x"]),
+                lhs_c=tuple(init["lhs_c"]),
+                rhs_x=tuple(init["rhs_x"]),
+                rhs_c=tuple(init["rhs_c"]),
+            ),
+            solution=int(rec["solution"]),
+        )
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return self.problem.initial
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_lineq import enumerate_tree
+            self._tree = enumerate_tree(self.problem, max_nodes=1000,
+                                         max_depth=10)
+        return self._tree
+
+    def winning_steps(self, state):
+        from src.oracle_lineq import winning_steps as ws, apply_op
+        wins = ws(state, self.problem)
+        out = []
+        for op in wins:
+            ns = apply_op(state, op)
+            if ns is not None:
+                out.append((op, ns))
+        return out
+
+    def validate_apply(self, state, action):
+        from src.oracle_lineq import validate_step
+        op, _ = action
+        legal, ns = validate_step(state, op)
+        return legal, ns
+
+    def is_solved(self, state):
+        from src.oracle_lineq import is_solved
+        return is_solved(state, self.problem.solution)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_lineq import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, op, state_after):
+        from src.oracle_lineq import format_step_text
+        return format_step_text(op, state_after)
+
+    def parse_step(self, step_body: str, state, history):
+        from src.oracle_lineq import parse_step, validate_step
+        op = parse_step(step_body)
+        if op is None:
+            return None
+        legal, ns = validate_step(state, op)
+        if not legal:
+            return None
+        return ((op, ns), step_body.strip())
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        op, _ = action
+        body = self._action_text(op, state_after)
+        if self.is_solved(state_after):
+            return f" {body}. Answer: x = {self.problem.solution}"
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve a single-variable linear equation. Apply one "
+                "canonical operation per step until the equation is in "
+                "x = K form. Allowed operations:\n"
+                "  - combine like x-terms on the left/right\n"
+                "  - combine constants on the left/right\n"
+                "  - subtract A*x from both sides\n"
+                "  - subtract B from both sides\n"
+                "  - divide both sides by C\n"
+                "Output format:\n"
+                "  Step 1: <operation> -> <new equation>.\n"
+                "  Step 2: <operation> -> <new equation>.\n"
+                "  ...\n"
+                "  Step K: divide both sides by C -> x = N. Answer: x = N\n"
+                "Solve in canonical order: combine first, then move x, then "
+                "move constants, then divide.")
+        from src.oracle_lineq import format_question
+        user = format_question(self.problem)
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        return f"Step {step_num}:"
+
+
+# ---------- ProofWriter (CWA depth-3, NL deductive proof) ----------
+
+
+class ProofWriterAdapter:
+    name = "proofwriter"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = ANSWER_RE
+
+    def __init__(self, rec: dict):
+        from src.oracle_proofwriter import Problem
+        self.rec = rec
+        triple_texts = {
+            tuple(k): v for (k, v) in rec.get("triple_texts", [])
+        }
+        self.problem = Problem(
+            theory_text=rec["theory_text"],
+            initial_facts=tuple(tuple(t) for t in rec["initial_facts"]),
+            rule_texts=dict(rec["rule_texts"]),
+            rules_struct=dict(rec["rules_struct"]),
+            triple_texts=triple_texts,
+            target=tuple(rec["target"]),
+            target_text=rec["target_text"],
+            answer=bool(rec["answer"]),
+            proof_chain=tuple({
+                "rule_id": s["rule_id"],
+                "intermediate": tuple(s["intermediate"]),
+                "intermediate_text": s["intermediate_text"],
+            } for s in rec["proof_chain"]),
+        )
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return frozenset(self.problem.initial_facts)
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_proofwriter import enumerate_tree
+            self._tree = enumerate_tree(self.problem)
+        return self._tree
+
+    def winning_steps(self, state):
+        from src.oracle_proofwriter import winning_steps as ws
+        wins = ws(state, self.problem)
+        out = []
+        for step in wins:
+            ns = state | {step["intermediate"]}
+            out.append((step, ns))
+        return out
+
+    def validate_apply(self, state, action):
+        from src.oracle_proofwriter import validate_step
+        step, _ = action
+        legal, ns = validate_step(state, step, self.problem)
+        return legal, ns
+
+    def is_solved(self, state):
+        from src.oracle_proofwriter import is_solved
+        return is_solved(state, self.problem.target, self.problem.answer,
+                          self.problem.proof_chain)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_proofwriter import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, step):
+        from src.oracle_proofwriter import format_step_text
+        return format_step_text(step)
+
+    def parse_step(self, step_body: str, state, history):
+        from src.oracle_proofwriter import parse_step
+        step = parse_step(step_body, self.problem, state)
+        if step is None:
+            return None
+        ns = state | {step["intermediate"]}
+        return ((step, ns), step_body.strip())
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        step, _ = action
+        body = self._action_text(step)
+        if self.is_solved(state_after):
+            ans = "True" if self.problem.answer else "False"
+            return f" {body}. Answer: {ans}"
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve a deductive reasoning task. Read the theory "
+                "and apply rules step by step until you can decide whether "
+                "the question's statement is true or false. Output format:\n"
+                "  Step 1: apply ruleN: <derived fact in NL>.\n"
+                "  Step 2: apply ruleM: <derived fact>.\n"
+                "  ...\n"
+                "  Step K: apply ruleK: <final derived fact>. Answer: True\n"
+                "Output 'Answer: True' if the question follows from the "
+                "theory, 'Answer: False' otherwise. Use only the rules in "
+                "the theory. Steps may be omitted if the answer is "
+                "directly stated in the initial facts.")
+        from src.oracle_proofwriter import format_question
+        user = format_question(self.problem)
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        return f"Step {step_num}:"
+
+
 ADAPTERS = {
     "pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
     "gc": GraphColorAdapter,
     "rulechain": RuleChainAdapter,
     "synthlogic": SynthlogicAdapter,
     "clutrr": CLUTRRAdapter,
+    "lineq": LinearEqAdapter,
+    "proofwriter": ProofWriterAdapter,
 }

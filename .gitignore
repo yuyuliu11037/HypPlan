@@ -211,8 +211,32 @@ outputs/
 wandb/
 logs/
 runs/
-data/
 checkpoints/
 results/
+
+# `data/` mixes code (generators / importers) with bulky inputs (JSONL,
+# tree-data caches with hidden states, oracle caches). Ignore the bulky
+# inputs, keep the code.
+data/*
+!data/*.py
+!data/.gitkeep
+!data/README.md
+data/__pycache__/
+
+# Vendored / cloned external datasets and codebases. These are
+# downloaded by the corresponding import scripts (e.g.
+# data/import_proofwriter.py) and should be re-downloaded rather than
+# committed.
+external/
+
+# Pre-generated planning-token + DPO + tree-data caches (under data/,
+# but list explicitly here in case future code writes them elsewhere)
+*.pkl
+*_trees_*/
+
+# Editor / runtime junk
+nohup.out
+*.swp
+*.swo
 
 .claude/

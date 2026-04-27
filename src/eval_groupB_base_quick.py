@@ -31,7 +31,11 @@ def main():
     ap.add_argument("--out_dir", default="results/eval_groupB_base")
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--max_new_tokens", type=int, default=384)
+    ap.add_argument("--tasks", default=None,
+                     help="Comma-separated subset of tasks; default = all 5")
     args = ap.parse_args()
+    if args.tasks:
+        args.tasks = args.tasks.split(",")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -62,20 +66,26 @@ def main():
     model.eval()
 
     from src.dagger_ood_adapters import ADAPTERS
-    from src.score_ood import score_rulechain, score_clutrr
+    from src.score_ood import (
+        score_rulechain, score_clutrr, score_lineq, score_proofwriter,
+    )
 
     SCORERS = {
         "rulechain": score_rulechain,
         "synthlogic": score_rulechain,
         "clutrr": score_clutrr,
+        "lineq": score_lineq,
+        "proofwriter": score_proofwriter,
     }
     TEST_FILES = {
         t: f"data/{t}_test.jsonl"
-        for t in ["rulechain", "synthlogic", "clutrr"]
+        for t in ["rulechain", "synthlogic", "clutrr", "lineq",
+                   "proofwriter"]
     }
 
+    tasks_arg = getattr(args, "tasks", None) or list(SCORERS.keys())
     summary = []
-    for task in ["rulechain", "synthlogic", "clutrr"]:
+    for task in tasks_arg:
         records = [json.loads(l) for l in open(TEST_FILES[task])][: args.limit]
         adapter_cls = ADAPTERS[task]
         out_path = out_dir / f"{task}_base_4bit.jsonl"
