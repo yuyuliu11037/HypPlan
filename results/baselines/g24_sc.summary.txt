@@ -1,0 +1,3 @@
+task=g24 mode=sc n=100
+  any-of-K: 21/100 = 21%
+  majority: 21/100 = 21%
