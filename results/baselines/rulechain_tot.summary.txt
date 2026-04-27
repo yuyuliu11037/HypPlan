@@ -1,0 +1,3 @@
+task=rulechain mode=tot n=600
+  top1: 314/600 = 52%
+  any-of-K: 480/600 = 80%
