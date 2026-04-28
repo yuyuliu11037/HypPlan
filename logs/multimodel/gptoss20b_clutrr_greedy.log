@@ -1,0 +1,29 @@
+[r0] Loading openai/gpt-oss-20b (4bit=True)
+Fetching 42 files:   0%|          | 0/42 [00:00<?, ?it/s]Fetching 42 files: 100%|██████████| 42/42 [00:00<00:00, 2788.06it/s]
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<04:40,  1.46it/s]Loading weights:   1%|▏         | 6/411 [00:00<00:44,  9.06it/s]Loading weights:   5%|▌         | 22/411 [00:00<00:10, 36.86it/s]Loading weights:   8%|▊         | 31/411 [00:01<00:08, 46.75it/s]Loading weights:  10%|▉         | 40/411 [00:01<00:07, 48.34it/s]Loading weights:  14%|█▍        | 58/411 [00:01<00:05, 62.51it/s]Loading weights:  18%|█▊        | 74/411 [00:01<00:04, 68.01it/s]Loading weights:  22%|██▏       | 91/411 [00:01<00:04, 78.14it/s]Loading weights:  26%|██▋       | 108/411 [00:02<00:03, 76.64it/s]Loading weights:  30%|███       | 124/411 [00:02<00:03, 76.93it/s]Loading weights:  35%|███▍      | 143/411 [00:02<00:03, 83.21it/s]Loading weights:  39%|███▊      | 159/411 [00:02<00:02, 89.56it/s]Loading weights:  43%|████▎     | 177/411 [00:02<00:02, 92.38it/s]Loading weights:  47%|████▋     | 193/411 [00:02<00:02, 88.41it/s]Loading weights:  51%|█████     | 210/411 [00:03<00:02, 85.90it/s]Loading weights:  55%|█████▌    | 227/411 [00:03<00:02, 86.33it/s]Loading weights:  60%|█████▉    | 245/411 [00:03<00:01, 88.35it/s]Loading weights:  64%|██████▎   | 261/411 [00:03<00:01, 93.51it/s]Loading weights:  68%|██████▊   | 278/411 [00:03<00:01, 97.76it/s]Loading weights:  72%|███████▏  | 295/411 [00:04<00:01, 97.37it/s]Loading weights:  76%|███████▌  | 313/411 [00:04<00:00, 99.27it/s]Loading weights:  80%|████████  | 329/411 [00:04<00:00, 99.82it/s]Loading weights:  84%|████████▍ | 346/411 [00:04<00:00, 96.24it/s]Loading weights:  88%|████████▊ | 363/411 [00:04<00:00, 97.66it/s]Loading weights:  93%|█████████▎| 381/411 [00:04<00:00, 97.71it/s]Loading weights:  97%|█████████▋| 397/411 [00:05<00:00, 95.04it/s]Loading weights: 100%|██████████| 411/411 [00:05<00:00, 80.44it/s]
+[r0] mode=greedy task=clutrr records=200 K=5
+[transformers] The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+[transformers] The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+  [r0] 10/200 top1=0% rate=0.03/s
+  [r0] 20/200 top1=0% rate=0.04/s
+  [r0] 30/200 top1=7% rate=0.04/s
+  [r0] 40/200 top1=10% rate=0.04/s
+  [r0] 50/200 top1=10% rate=0.04/s
+  [r0] 60/200 top1=10% rate=0.04/s
+  [r0] 70/200 top1=10% rate=0.04/s
+  [r0] 80/200 top1=11% rate=0.04/s
+  [r0] 90/200 top1=13% rate=0.04/s
+  [r0] 100/200 top1=14% rate=0.04/s
+  [r0] 110/200 top1=14% rate=0.04/s
+  [r0] 120/200 top1=15% rate=0.04/s
+  [r0] 130/200 top1=14% rate=0.04/s
+  [r0] 140/200 top1=15% rate=0.04/s
+  [r0] 150/200 top1=14% rate=0.04/s
+  [r0] 160/200 top1=13% rate=0.04/s
+  [r0] 170/200 top1=14% rate=0.04/s
+  [r0] 180/200 top1=13% rate=0.04/s
+  [r0] 190/200 top1=13% rate=0.03/s
+  [r0] 200/200 top1=14% rate=0.03/s
+
+[r0] clutrr greedy (n=200, K=5) (5841s):
+  top1: 28/200 = 14%
