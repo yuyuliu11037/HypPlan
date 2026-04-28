@@ -1,0 +1,2 @@
+task=clutrr in-domain HypPlan n=200
+  correct: 200/200 = 100%
