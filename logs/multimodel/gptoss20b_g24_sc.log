@@ -1,0 +1,18 @@
+[r0] Loading openai/gpt-oss-20b (4bit=True)
+Fetching 42 files:   0%|          | 0/42 [00:00<?, ?it/s]Fetching 42 files: 100%|██████████| 42/42 [00:00<00:00, 3560.03it/s]
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<03:19,  2.05it/s]Loading weights:   0%|          | 2/411 [00:01<04:04,  1.67it/s]Loading weights:   2%|▏         | 7/411 [00:01<00:55,  7.28it/s]Loading weights:   5%|▌         | 22/411 [00:01<00:15, 25.02it/s]Loading weights:   9%|▉         | 38/411 [00:01<00:09, 39.10it/s]Loading weights:  14%|█▍        | 58/411 [00:01<00:06, 55.55it/s]Loading weights:  18%|█▊        | 74/411 [00:02<00:05, 62.22it/s]Loading weights:  22%|██▏       | 91/411 [00:02<00:04, 73.28it/s]Loading weights:  27%|██▋       | 109/411 [00:02<00:04, 74.25it/s]Loading weights:  30%|███       | 124/411 [00:02<00:03, 73.04it/s]Loading weights:  34%|███▍      | 141/411 [00:02<00:03, 75.78it/s]Loading weights:  39%|███▊      | 159/411 [00:03<00:03, 79.98it/s]Loading weights:  43%|████▎     | 177/411 [00:03<00:02, 83.37it/s]Loading weights:  47%|████▋     | 194/411 [00:03<00:02, 88.50it/s]Loading weights:  51%|█████     | 210/411 [00:03<00:02, 87.18it/s]Loading weights:  55%|█████▌    | 227/411 [00:03<00:02, 92.00it/s]Loading weights:  59%|█████▊    | 241/411 [00:03<00:01, 98.24it/s]Loading weights:  61%|██████▏   | 252/411 [00:04<00:01, 94.09it/s]Loading weights:  64%|██████▎   | 262/411 [00:04<00:01, 80.71it/s]Loading weights:  68%|██████▊   | 279/411 [00:04<00:01, 78.94it/s]Loading weights:  72%|███████▏  | 296/411 [00:04<00:01, 88.20it/s]Loading weights:  76%|███████▌  | 311/411 [00:04<00:00, 100.34it/s]Loading weights:  78%|███████▊  | 322/411 [00:04<00:00, 96.41it/s] Loading weights:  81%|████████  | 333/411 [00:05<00:00, 86.96it/s]Loading weights:  84%|████████▎ | 344/411 [00:05<00:00, 91.14it/s]Loading weights:  86%|████████▌ | 354/411 [00:05<00:00, 85.48it/s]Loading weights:  88%|████████▊ | 363/411 [00:05<00:00, 74.36it/s]Loading weights:  92%|█████████▏| 380/411 [00:05<00:00, 80.53it/s]Loading weights:  97%|█████████▋| 397/411 [00:05<00:00, 82.32it/s]Loading weights: 100%|██████████| 411/411 [00:05<00:00, 70.35it/s]
+[r0] mode=sc task=g24 records=100 K=5
+[transformers] The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+  [r0] 10/100 maj=0% rate=0.16/s
+  [r0] 20/100 maj=0% rate=0.17/s
+  [r0] 30/100 maj=0% rate=0.16/s
+  [r0] 40/100 maj=5% rate=0.15/s
+  [r0] 50/100 maj=22% rate=0.15/s
+  [r0] 60/100 maj=22% rate=0.15/s
+  [r0] 70/100 maj=20% rate=0.14/s
+  [r0] 80/100 maj=18% rate=0.14/s
+  [r0] 90/100 maj=18% rate=0.14/s
+  [r0] 100/100 maj=16% rate=0.14/s
+
+[r0] g24 sc (n=100, K=5) (694s):
+  maj:  16/100 = 16%
