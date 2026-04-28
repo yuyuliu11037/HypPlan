@@ -1,0 +1,2 @@
+task=rulechain in-domain HypPlan n=200
+  correct: 160/200 = 80%
