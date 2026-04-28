@@ -1,0 +1,28 @@
+[r0] Loading openai/gpt-oss-20b (4bit=True)
+Fetching 42 files:   0%|          | 0/42 [00:00<?, ?it/s]Fetching 42 files: 100%|██████████| 42/42 [00:00<00:00, 2422.35it/s]
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<04:24,  1.55it/s]Loading weights:   1%|▏         | 6/411 [00:00<00:41,  9.84it/s]Loading weights:   5%|▌         | 22/411 [00:00<00:10, 36.69it/s]Loading weights:  10%|▉         | 41/411 [00:01<00:06, 61.45it/s]Loading weights:  14%|█▍        | 57/411 [00:01<00:05, 67.01it/s]Loading weights:  18%|█▊        | 74/411 [00:01<00:04, 77.54it/s]Loading weights:  22%|██▏       | 91/411 [00:01<00:03, 88.21it/s]Loading weights:  26%|██▋       | 108/411 [00:01<00:03, 92.92it/s]Loading weights:  31%|███       | 126/411 [00:01<00:02, 100.76it/s]Loading weights:  35%|███▍      | 143/411 [00:02<00:02, 97.85it/s] Loading weights:  38%|███▊      | 158/411 [00:02<00:02, 93.19it/s]Loading weights:  43%|████▎     | 177/411 [00:02<00:02, 102.97it/s]Loading weights:  47%|████▋     | 194/411 [00:02<00:02, 108.25it/s]Loading weights:  51%|█████     | 210/411 [00:02<00:01, 111.10it/s]Loading weights:  55%|█████▌    | 228/411 [00:02<00:01, 112.04it/s]Loading weights:  60%|█████▉    | 245/411 [00:02<00:01, 114.96it/s]Loading weights:  64%|██████▎   | 261/411 [00:03<00:01, 113.39it/s]Loading weights:  68%|██████▊   | 278/411 [00:03<00:01, 112.95it/s]Loading weights:  72%|███████▏  | 295/411 [00:03<00:01, 114.28it/s]Loading weights:  76%|███████▌  | 313/411 [00:03<00:00, 119.27it/s]Loading weights:  80%|████████  | 330/411 [00:03<00:00, 111.88it/s]Loading weights:  84%|████████▍ | 346/411 [00:03<00:00, 107.91it/s]Loading weights:  88%|████████▊ | 362/411 [00:04<00:00, 104.82it/s]Loading weights:  93%|█████████▎| 381/411 [00:04<00:00, 104.49it/s]Loading weights:  97%|█████████▋| 397/411 [00:04<00:00, 99.37it/s] Loading weights: 100%|██████████| 411/411 [00:04<00:00, 92.48it/s]
+[r0] mode=sc task=proofwriter records=200 K=5
+[transformers] The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+  [r0] 10/200 maj=20% rate=0.04/s
+  [r0] 20/200 maj=35% rate=0.04/s
+  [r0] 30/200 maj=30% rate=0.04/s
+  [r0] 40/200 maj=35% rate=0.04/s
+  [r0] 50/200 maj=38% rate=0.04/s
+  [r0] 60/200 maj=42% rate=0.04/s
+  [r0] 70/200 maj=41% rate=0.04/s
+  [r0] 80/200 maj=46% rate=0.04/s
+  [r0] 90/200 maj=42% rate=0.04/s
+  [r0] 100/200 maj=41% rate=0.04/s
+  [r0] 110/200 maj=41% rate=0.04/s
+  [r0] 120/200 maj=41% rate=0.04/s
+  [r0] 130/200 maj=44% rate=0.04/s
+  [r0] 140/200 maj=44% rate=0.04/s
+  [r0] 150/200 maj=46% rate=0.04/s
+  [r0] 160/200 maj=47% rate=0.04/s
+  [r0] 170/200 maj=47% rate=0.04/s
+  [r0] 180/200 maj=47% rate=0.04/s
+  [r0] 190/200 maj=45% rate=0.04/s
+  [r0] 200/200 maj=47% rate=0.04/s
+
+[r0] proofwriter sc (n=200, K=5) (5282s):
+  maj:  94/200 = 47%
