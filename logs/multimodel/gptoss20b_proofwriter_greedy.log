@@ -1,0 +1,29 @@
+[r0] Loading openai/gpt-oss-20b (4bit=True)
+Fetching 42 files:   0%|          | 0/42 [00:00<?, ?it/s]Fetching 42 files: 100%|██████████| 42/42 [00:00<00:00, 2542.22it/s]
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<04:53,  1.40it/s]Loading weights:   1%|▏         | 6/411 [00:00<00:46,  8.74it/s]Loading weights:   6%|▌         | 23/411 [00:01<00:12, 30.28it/s]Loading weights:  10%|▉         | 41/411 [00:01<00:07, 48.90it/s]Loading weights:  14%|█▍        | 58/411 [00:01<00:05, 61.85it/s]Loading weights:  18%|█▊        | 74/411 [00:01<00:04, 69.12it/s]Loading weights:  22%|██▏       | 92/411 [00:01<00:04, 78.03it/s]Loading weights:  26%|██▋       | 108/411 [00:02<00:03, 79.35it/s]Loading weights:  31%|███       | 126/411 [00:02<00:03, 79.93it/s]Loading weights:  35%|███▍      | 142/411 [00:02<00:03, 77.61it/s]Loading weights:  39%|███▊      | 159/411 [00:02<00:03, 80.84it/s]Loading weights:  43%|████▎     | 177/411 [00:02<00:02, 87.96it/s]Loading weights:  47%|████▋     | 194/411 [00:03<00:02, 81.80it/s]Loading weights:  51%|█████     | 210/411 [00:03<00:02, 79.59it/s]Loading weights:  55%|█████▌    | 228/411 [00:03<00:02, 83.70it/s]Loading weights:  60%|█████▉    | 245/411 [00:03<00:01, 84.32it/s]Loading weights:  64%|██████▎   | 261/411 [00:03<00:01, 82.76it/s]Loading weights:  68%|██████▊   | 278/411 [00:04<00:01, 89.64it/s]Loading weights:  72%|███████▏  | 295/411 [00:04<00:01, 87.11it/s]Loading weights:  76%|███████▌  | 313/411 [00:04<00:01, 94.49it/s]Loading weights:  80%|████████  | 330/411 [00:04<00:00, 102.82it/s]Loading weights:  84%|████████▍ | 345/411 [00:04<00:00, 94.85it/s] Loading weights:  89%|████████▊ | 364/411 [00:04<00:00, 99.53it/s]Loading weights:  93%|█████████▎| 381/411 [00:05<00:00, 98.20it/s]Loading weights:  97%|█████████▋| 397/411 [00:05<00:00, 93.77it/s]Loading weights: 100%|██████████| 411/411 [00:05<00:00, 77.95it/s]
+[r0] mode=greedy task=proofwriter records=200 K=5
+[transformers] The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+[transformers] The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+  [r0] 10/200 top1=20% rate=0.04/s
+  [r0] 20/200 top1=25% rate=0.04/s
+  [r0] 30/200 top1=23% rate=0.04/s
+  [r0] 40/200 top1=28% rate=0.04/s
+  [r0] 50/200 top1=26% rate=0.04/s
+  [r0] 60/200 top1=27% rate=0.04/s
+  [r0] 70/200 top1=24% rate=0.04/s
+  [r0] 80/200 top1=24% rate=0.04/s
+  [r0] 90/200 top1=21% rate=0.04/s
+  [r0] 100/200 top1=20% rate=0.04/s
+  [r0] 110/200 top1=22% rate=0.04/s
+  [r0] 120/200 top1=22% rate=0.04/s
+  [r0] 130/200 top1=26% rate=0.04/s
+  [r0] 140/200 top1=27% rate=0.04/s
+  [r0] 150/200 top1=30% rate=0.04/s
+  [r0] 160/200 top1=30% rate=0.04/s
+  [r0] 170/200 top1=29% rate=0.04/s
+  [r0] 180/200 top1=29% rate=0.04/s
+  [r0] 190/200 top1=29% rate=0.04/s
+  [r0] 200/200 top1=30% rate=0.04/s
+
+[r0] proofwriter greedy (n=200, K=5) (5347s):
+  top1: 59/200 = 30%
