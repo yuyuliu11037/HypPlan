@@ -1,0 +1,29 @@
+[r0] Loading openai/gpt-oss-20b (4bit=True)
+Fetching 42 files:   0%|          | 0/42 [00:00<?, ?it/s]Fetching 42 files: 100%|██████████| 42/42 [00:00<00:00, 3789.30it/s]
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   0%|          | 1/411 [00:00<05:14,  1.31it/s]Loading weights:   2%|▏         | 7/411 [00:00<00:43,  9.35it/s]Loading weights:   6%|▌         | 23/411 [00:01<00:13, 29.11it/s]Loading weights:  10%|▉         | 40/411 [00:01<00:07, 47.39it/s]Loading weights:  14%|█▎        | 56/411 [00:01<00:06, 53.14it/s]Loading weights:  18%|█▊        | 73/411 [00:01<00:04, 72.20it/s]Loading weights:  20%|██        | 83/411 [00:01<00:04, 72.06it/s]Loading weights:  23%|██▎       | 93/411 [00:02<00:05, 62.65it/s]Loading weights:  26%|██▋       | 108/411 [00:02<00:04, 65.72it/s]Loading weights:  31%|███       | 126/411 [00:02<00:03, 72.50it/s]Loading weights:  35%|███▍      | 143/411 [00:02<00:03, 76.18it/s]Loading weights:  39%|███▊      | 159/411 [00:02<00:03, 74.33it/s]Loading weights:  43%|████▎     | 177/411 [00:03<00:02, 80.77it/s]Loading weights:  46%|████▋     | 191/411 [00:03<00:02, 83.44it/s]Loading weights:  51%|█████     | 210/411 [00:03<00:02, 90.88it/s]Loading weights:  55%|█████▌    | 228/411 [00:03<00:01, 92.33it/s]Loading weights:  60%|█████▉    | 245/411 [00:03<00:01, 93.30it/s]Loading weights:  64%|██████▎   | 261/411 [00:03<00:01, 92.26it/s]Loading weights:  68%|██████▊   | 278/411 [00:04<00:01, 92.52it/s]Loading weights:  72%|███████▏  | 295/411 [00:04<00:01, 82.88it/s]Loading weights:  75%|███████▌  | 310/411 [00:04<00:01, 89.90it/s]Loading weights:  78%|███████▊  | 321/411 [00:04<00:00, 93.32it/s]Loading weights:  81%|████████  | 331/411 [00:04<00:01, 78.52it/s]Loading weights:  84%|████████▍ | 346/411 [00:04<00:00, 79.43it/s]Loading weights:  88%|████████▊ | 363/411 [00:05<00:00, 84.30it/s]Loading weights:  93%|█████████▎| 381/411 [00:05<00:00, 79.44it/s]Loading weights:  95%|█████████▍| 390/411 [00:05<00:00, 79.27it/s]Loading weights:  97%|█████████▋| 399/411 [00:05<00:00, 79.27it/s]Loading weights: 100%|██████████| 411/411 [00:05<00:00, 72.58it/s]
+[r0] mode=greedy task=rulechain records=200 K=5
+[transformers] The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+[transformers] The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+  [r0] 10/200 top1=30% rate=0.03/s
+  [r0] 20/200 top1=30% rate=0.03/s
+  [r0] 30/200 top1=27% rate=0.03/s
+  [r0] 40/200 top1=20% rate=0.03/s
+  [r0] 50/200 top1=18% rate=0.03/s
+  [r0] 60/200 top1=15% rate=0.03/s
+  [r0] 70/200 top1=17% rate=0.03/s
+  [r0] 80/200 top1=16% rate=0.03/s
+  [r0] 90/200 top1=16% rate=0.03/s
+  [r0] 100/200 top1=18% rate=0.03/s
+  [r0] 110/200 top1=17% rate=0.03/s
+  [r0] 120/200 top1=18% rate=0.03/s
+  [r0] 130/200 top1=18% rate=0.03/s
+  [r0] 140/200 top1=17% rate=0.03/s
+  [r0] 150/200 top1=17% rate=0.03/s
+  [r0] 160/200 top1=16% rate=0.03/s
+  [r0] 170/200 top1=17% rate=0.03/s
+  [r0] 180/200 top1=17% rate=0.03/s
+  [r0] 190/200 top1=16% rate=0.03/s
+  [r0] 200/200 top1=16% rate=0.03/s
+
+[r0] rulechain greedy (n=200, K=5) (7385s):
+  top1: 31/200 = 16%
