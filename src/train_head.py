@@ -402,12 +402,15 @@ def main():
         for batch_idx, batch in enumerate(train_loader):
             item = batch[0]
             n = item["n"]
-            if n < 2:
-                continue
             hidden = torch.as_tensor(item["hidden"], device=device, dtype=torch.float32)
             z = head_train(hidden)
 
-            if loss_name == "distortion":
+            if n < 2:
+                # Phantom zero-loss to keep DDP gradient all-reduce in sync
+                # across ranks. Skipping `continue` here would desync (some
+                # ranks call backward, others don't) and hang gloo collectives.
+                loss = z.abs().sum() * 0.0
+            elif loss_name == "distortion":
                 pairs = sample_pairs(n, pairs_per_tree, rng)
                 d_tree = pair_distances_lca(
                     item["parents"], item["depths"],

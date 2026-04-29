@@ -1,2 +1,0 @@
-task=rulechain mode=tot n=600
-  top1: 314/600 = 52%

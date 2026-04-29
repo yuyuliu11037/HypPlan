@@ -38,6 +38,13 @@ def build_question(task: str, rec: dict) -> str:
         # Group B: SFT-PT was trained with question = rec["prompt"]
         # (matches data/annotate_sft_plan_groupB.py).
         return rec["prompt"]
+    if task == "nqueens":
+        # N-Queens test records carry only N/k/prefix/gold_extension.
+        # Reconstruct the same question text the PT-SFT annotator used.
+        from src.oracle_nqueens import Problem, format_question
+        prob = Problem(N=int(rec["N"]),
+                       prefix=tuple(rec.get("prefix", [])))
+        return format_question(prob)
     raise ValueError(task)
 
 
@@ -46,7 +53,8 @@ def main():
     ap.add_argument("--task", required=True,
                      choices=["cd", "bw", "pq", "gc",
                               "rulechain", "synthlogic", "clutrr",
-                              "lineq", "proofwriter", "numpath"])
+                              "lineq", "proofwriter", "numpath",
+                              "nqueens"])
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-14B-Instruct")
     ap.add_argument("--lora_adapter", required=True)
     ap.add_argument("--test_data", required=True)
@@ -62,9 +70,15 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    base = AutoModelForCausalLM.from_pretrained(
-        args.base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
-    ).to(device)
+    is_gpt_oss = "gpt-oss" in args.base_model.lower()
+    if is_gpt_oss:
+        base = AutoModelForCausalLM.from_pretrained(
+            args.base_model, trust_remote_code=True, device_map="auto",
+        )
+    else:
+        base = AutoModelForCausalLM.from_pretrained(
+            args.base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        ).to(device)
     print(f"Attaching LoRA {args.lora_adapter}", flush=True)
     model = PeftModel.from_pretrained(base, args.lora_adapter)
     model.eval()

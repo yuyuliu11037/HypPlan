@@ -30,18 +30,42 @@ _PLAN_TAGS: dict[str, str] = {
     "lineq": "<PLAN:OP>",
     "proofwriter": "<PLAN:APPLY>",
     "numpath": "<PLAN:OP>",
+    "nqueens": "<PLAN:PLACE>",
 }
+
+
+def _nqueens_prompt_and_answer(rec: dict) -> tuple[str, str]:
+    """Build (prompt, answer_label) for an N-Queens record on the fly,
+    since the universe-partition data generator does not include these
+    fields. answer_label is one Step line per row plus the final
+    'Solution: [...]' line."""
+    from src.oracle_nqueens import Problem, format_question
+    N = int(rec["N"])
+    prefix = list(rec.get("prefix", []))
+    gold = list(rec["gold_extension"])
+    prob = Problem(N=N, prefix=tuple(prefix))
+    prompt = format_question(prob)
+    # Trajectory: emit one step line for each row from len(prefix)+1 onward.
+    lines = []
+    for r, c in enumerate(gold, 1):
+        if r <= len(prefix):
+            continue   # already placed in problem statement
+        lines.append(f"Step {r}: Place queen in row {r} at column {c}.")
+    sol_str = ", ".join(str(c) for c in gold)
+    lines.append(f"Solution: [{sol_str}]")
+    answer_label = "\n".join(lines)
+    return prompt, answer_label
 
 
 def annotate(answer_label: str, plan_tag: str) -> str:
     """Walk the gold trajectory text line-by-line, tag each `Step N:` line
-    with `plan_tag`, tag the `Answer:` line with `<PLAN:ANS>`."""
+    with `plan_tag`, tag the `Answer:`/`Solution:` line with `<PLAN:ANS>`."""
     out_lines: list[str] = []
     for ln in answer_label.split("\n"):
         s = ln.strip()
         if s.startswith("Step ") and ":" in s:
             out_lines.append(f"{plan_tag} {ln}")
-        elif s.startswith("Answer:"):
+        elif s.startswith("Answer:") or s.startswith("Solution:"):
             out_lines.append(f"<PLAN:ANS> {ln}")
         else:
             # multi-line answer body (e.g., minisudoku grid) — leave as-is
@@ -49,10 +73,15 @@ def annotate(answer_label: str, plan_tag: str) -> str:
     return "\n".join(out_lines)
 
 
-def convert_record(rec: dict, plan_tag: str) -> dict:
+def convert_record(rec: dict, plan_tag: str, task: str) -> dict:
+    if task == "nqueens":
+        prompt, answer_label = _nqueens_prompt_and_answer(rec)
+    else:
+        prompt = rec["prompt"]
+        answer_label = rec["answer_label"]
     return {
-        "question": rec["prompt"],
-        "answer": annotate(rec["answer_label"], plan_tag),
+        "question": prompt,
+        "answer": annotate(answer_label, plan_tag),
         "id": rec.get("id", ""),
     }
 
@@ -73,7 +102,7 @@ def main():
     with open(in_path) as fin, open(out_path, "w") as fout:
         for ln in fin:
             rec = json.loads(ln)
-            out_rec = convert_record(rec, plan_tag)
+            out_rec = convert_record(rec, plan_tag, args.task)
             fout.write(json.dumps(out_rec) + "\n")
             n += 1
     print(f"wrote {n} records: {in_path} -> {out_path}")

@@ -218,14 +218,14 @@ All 3 × 8 baseline cells run, per-cell results committed under
 
 | Task | Base | ToT (top-1) | SC (majority) | PT-SFT |
 |---|---|---|---|---|
-| 24 Game | 11% | 10% | 21% | 6% |
-| Number-path | 34.5% | 32% | 32% | **44.5%** |
+| 24 Game | 11% | 1% | 21% | 6% |
+| Number-path | 34.5% | TBD | 32% | **44.5%** |
 | Blocksworld | 41% | 58% | 60% | 94.5% |
 | Graph Coloring | 61% | 34% | 66% | 64% |
-| rule-chaining | 53% | 52% | 78% | **87.2%** |
+| rule-chaining | 53% | TBD | 78% | **87.2%** |
 | ProntoQA | 60% | 41% | 58% | 52.5% |
-| CLUTRR-like | 13% | 10% | 10% | **100%** ⁂ |
-| ProofWriter | 70% | 69% | 74% | 49% |
+| CLUTRR-like | 13% | TBD | 10% | **100%** ⁂ |
+| ProofWriter | 70% | TBD | 74% | 49% |
 
 ⁂ CLUTRR PT-SFT 100% is a memorisation ceiling — train + test share
 the same finite kinship composition table; not a generalisation claim
@@ -235,18 +235,18 @@ Caveats:
 - Numbers in this session are **4-bit Qwen-14B-Instruct** (memory
   budget); v1 numbers (G24, BW, GC, ProntoQA, the 4 v1 PT-SFT cells)
   are bf16. 4-bit is a lower bound on bf16.
-- ToT is *not* the v1 propose+value tot_ood.py for the new tasks
-  (which would require new ToT-specific adapters per task). It is a
-  single greedy rollout under the dagger_ood adapter's structured
-  Step-1 priming prompt — i.e. structured CoT, not the full Yao et al.
-  branch-pruning ToT. We sampled K=5 trajectories alongside (saved in
-  the per-cell jsonls) but the lenient any-of-K metric requires the
-  gold label to select the right sample, so we don't report it.
+- **ToT cells**: G24 + PQ/BW/GC use paper-faithful BFS
+  (`src/tot_baseline.py`, `src/tot_ood.py`). ToT for Number-path /
+  rule-chaining / CLUTRR / ProofWriter is **TBD** — earlier numbers in
+  these cells were from a non-ToT runner (K-sample structured greedy)
+  and were deleted on 2026-04-27. Real ToT adapters for these 4 tasks
+  are pending; see "Planned: real ToT on 4 missing datasets" in
+  [README.md](../README.md).
 - SC reports majority vote (canonical Wang et al. 2023 Self-Consistency).
 - rulechain test set is 600 records (vs the 200-record OOD norm)
   because rulechain is the training source and reuses the same test
-  generator. SC was capped to 200 via `--limit 200`; ToT and PT-SFT
-  used full 600.
+  generator. SC was capped to 200 via `--limit 200`; PT-SFT used full
+  600.
 
 ### Pending (HypPlan Stage-1+2 transfer experiment)
 
@@ -256,6 +256,122 @@ Caveats:
 - Rule-chaining Stage-2 LoRA training (the Group B task-agnostic LoRA).
 - Group A and Group B 4-cell OOD eval matrices (base / lora-noz /
   lora-randz / lora-taskz) using the trained LoRAs.
+
+---
+
+## Resume state — 2026-04-28 (end of session)
+
+### What's done since 2026-04-27
+
+- **rulechain in-domain HypPlan**: head + Stage-2 + 6-shard eval done.
+  Result: **80% on 200 records** (`results/eval_stage2_indomain/rulechain/`).
+- **Phase A1 multimodel sweep** (greedy + SC × 8 tasks × {Qwen-14B,
+  GPT-OSS-20B, Mistral-3.2-24B}) — Qwen+GPT-OSS finished; Mistral-24B
+  still running on GPU 1 (latest cell: `bw_sc`, ~30 min in at session
+  end). Outputs in `results/multimodel/`.
+- **Engineering**: efficiency logging (`n_gen_tokens`, `latency_s`)
+  baked into [src/eval_baseline_kpath.py](../src/eval_baseline_kpath.py);
+  GPT-OSS mxfp4 loader (no BitsAndBytesConfig) added to
+  [src/train_sft_pt_qwen.py](../src/train_sft_pt_qwen.py) and
+  [src/eval_pt_ood.py](../src/eval_pt_ood.py).
+- **GPT-OSS-20B PT-SFT sweep started** on GPU 2 (G24 trained but
+  eval skipped — `--task 24` not in eval choices; sweep died there).
+  Pending: fix `--choices` in eval driver, restart sweep at G24.
+- **CLUTRR v1 → v2 rebuild**: v1 was 100% memorisation. v2 generator
+  (`data/generate_data_clutrr.py`) now adds distractor entities/edges
+  and supports per-split chain lengths. New default: train k∈{2,3},
+  test k=4 (held-out depth) + 2 distractor entities + 2 distractor
+  edges. v1 results backed up under `*.v1` filenames; v2 data + tree
+  caches regenerated (2400 problems).
+- **NCCL recheck**: confirmed still broken post server maintenance.
+  6-GPU NCCL run timed out on BROADCAST after 600s with all ranks
+  SIGABRT. Falling back to gloo for all DDP. Memory
+  `reference_nccl_topology.md` still accurate.
+- **CLUTRR v2 head**: 6-GPU gloo, 20 epochs in 7 min,
+  `checkpoints/head_clutrr_qwen14b_rank/head.pt` (22 MB).
+- **CLUTRR v2 Stage-2 LoRA**: 6-GPU gloo, 2 epochs (~4 h 30 min total),
+  `checkpoints/dagger_stage2_clutrr_indomain/lora/` (100 MB) +
+  `up_projector.pt` (42 MB). Final avg_loss 0.0040 (epoch 0) → 0.0000
+  (epoch 1).
+
+### Currently running at session end
+
+- **GPU 1**: Mistral-3.2-24B Phase A1 SC sweep (cell `bw_sc`,
+  PID 3750128). Don't kill — let it continue.
+- **GPUs 2–7**: idle (Stage-2 finished).
+
+### Pending in priority order (resume next session)
+
+1. **CLUTRR v2 in-domain HypPlan eval** — 6-shard, 200 test records.
+   Command:
+   ```bash
+   GPUS=(2 3 4 5 6 7)
+   for i in 0 1 2 3 4 5; do
+     CUDA_VISIBLE_DEVICES=${GPUS[$i]} nohup python3.10 -m src.eval_stage2_indomain \
+       --task clutrr \
+       --ckpt_dir checkpoints/dagger_stage2_clutrr_indomain \
+       --head_path checkpoints/head_clutrr_qwen14b_rank/head.pt \
+       --test_data data/clutrr_test.jsonl \
+       --output results/eval_stage2_indomain/clutrr/clutrr_shard${i}.jsonl \
+       --shard_rank $i --shard_world 6 \
+       > logs/clutrr_v2/eval_shard${i}.log 2>&1 &
+   done; wait
+   cat results/eval_stage2_indomain/clutrr/clutrr_shard*.jsonl \
+     > results/eval_stage2_indomain/clutrr/clutrr.jsonl
+   ```
+   ETA: ~15 min.
+2. **CLUTRR v2 PT-SFT (Qwen) retrain + eval** — old v1 LoRA is
+   memorisation; need fresh v2 SFT data + retrain. Regenerate
+   `data/clutrr_train_sft_plan.jsonl` from v2 train, retrain
+   `sft_pt_clutrr_qwen14b/lora`, eval on `data/clutrr_test.jsonl`.
+3. **Phase A1 cells 13–14 redo for clutrr v2** + finish proofwriter
+   (greedy + SC) on Qwen-14B + GPT-OSS-20B + Mistral-3.2-24B.
+4. **Resume indomain chain for numpath + proofwriter**: head +
+   Stage-2 + eval each. Use `scripts/run_indomain_chain.sh`. Numpath
+   tree-data is cached (2200 problems); proofwriter still needs
+   tree-data.
+5. **Resume GPT-OSS PT-SFT sweep**: first add `"24"` to eval driver
+   `--task` choices (or skip G24 in launcher), then re-launch
+   `scripts/run_gptoss_pt_sft_sweep.sh` from G24-eval onward.
+6. **Real ToT for 4 missing OOD tasks** (rulechain, clutrr v2,
+   numpath, proofwriter): build per-task adapters in
+   [src/tot_ood.py](../src/tot_ood.py), then run on Qwen + GPT-OSS +
+   Mistral.
+7. **Efficiency comparison row** for G24 across all systems.
+8. **Final HANDOFF + README** with the full matrix.
+
+### Quick verification commands
+
+```bash
+# Confirm CLUTRR v2 artifacts intact
+ls -la checkpoints/head_clutrr_qwen14b_rank/head.pt           # 22 MB
+ls -la checkpoints/dagger_stage2_clutrr_indomain/lora/        # adapter_model.safetensors 100 MB
+ls -la checkpoints/dagger_stage2_clutrr_indomain/up_projector.pt  # 42 MB
+wc -l data/clutrr_{train,val,test}.jsonl                      # 2000 / 200 / 200
+head -1 data/clutrr_test.jsonl | python3 -c \
+  'import json,sys;r=json.loads(sys.stdin.read());print("k=",r["k"])'  # k=4
+
+# Confirm Mistral sweep still alive (or finished)
+ps -p 3750128 -o pid,etime,cmd 2>/dev/null
+tail -5 logs/multimodel/mistral24b_bw_sc.log 2>/dev/null
+```
+
+### Critical context for whoever resumes
+
+- **NCCL is still broken** — every DDP launch must set
+  `HYPPLAN_DIST_BACKEND=gloo`. Confirmed 2026-04-28 with a 6-GPU
+  test that hung on BROADCAST.
+- **GPUs 2–7 are all "ours" right now** — user lifted the
+  GPU-restriction, and during this session GPUs 0/5 belonged to
+  other users; that may shift. Run `nvidia-smi` first.
+- **CLUTRR v1 results were memorisation** (100% on a finite
+  composition table). v2 fixes this with held-out depth k=4 +
+  distractors. Do NOT cite v1 numbers; they're under `*.v1`.
+- **Auto-stop pattern that worked here**: a foreground Bash
+  `until grep -q "expected line" log; do sleep 30; done` in
+  `run_in_background` mode — fires once when the trigger appears,
+  and you get a single notification. Cleaner than a Monitor for
+  "wake me at the next save".
 
 ---
 

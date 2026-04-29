@@ -160,9 +160,17 @@ def main():
 
     if rank == 0:
         print(f"Loading {base}", flush=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        base, trust_remote_code=True, torch_dtype=torch.bfloat16,
-    ).to(device)
+    is_gpt_oss = "gpt-oss" in base.lower()
+    if is_gpt_oss:
+        # GPT-OSS-20B ships pre-quantized with mxfp4 — let HF auto-handle
+        # dtype + placement via device_map="auto". Single-GPU only.
+        model = AutoModelForCausalLM.from_pretrained(
+            base, trust_remote_code=True, device_map="auto",
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            base, trust_remote_code=True, torch_dtype=torch.bfloat16,
+        ).to(device)
 
     lora_cfg = LoraConfig(
         r=int(config["model"]["lora_r"]),

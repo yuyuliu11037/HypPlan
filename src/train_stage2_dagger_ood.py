@@ -283,6 +283,10 @@ def main():
                             flush=True)
                 continue
             for ro in range(rollouts_per_problem):
+                # Per-rank heartbeat so silent hangs surface fast (user
+                # asked for this after a CLUTRR Stage-2 hang on 2026-04-29).
+                ro_t0 = time.time()
+                rec_id = rec.get('id', f'idx{ri}')
                 try:
                     r = rollout_one(
                         model, tokenizer, head, up_proj, adapter, device,
@@ -300,6 +304,13 @@ def main():
                         print(f"  [r{rank}] rollout fail rec {ri}: "
                                 f"{type(e).__name__} {e}", flush=True)
                     continue
+                ro_dt = time.time() - ro_t0
+                # Flag any rollout > 30s — likely the hang signature.
+                if ro_dt > 30.0:
+                    print(f"  [r{rank}] SLOW rollout rec={rec_id} ro={ro} "
+                            f"took {ro_dt:.1f}s "
+                            f"stop={r.stopped_reason} "
+                            f"n_bdy={len(r.boundaries)}", flush=True)
                 for bdy in r.boundaries:
                     if not bdy.winning_steps:
                         continue
@@ -309,7 +320,9 @@ def main():
                         "history": bdy.history_before,
                         "winners": bdy.winning_steps,
                     })
-            if rank == 0 and (ri + 1) % 25 == 0:
+            # Per-rank progress every 25 records so all ranks are visible
+            # under torchrun multi-stream stdout.
+            if (ri + 1) % 25 == 0 or (ri + 1) == len(my_records):
                 print(f"  [r{rank}] rollout {ri+1}/{len(my_records)} "
                         f"pairs={len(rollout_pairs)}", flush=True)
 

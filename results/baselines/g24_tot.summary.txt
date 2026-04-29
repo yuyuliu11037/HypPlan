@@ -1,2 +1,0 @@
-task=g24 mode=tot n=100
-  top1: 10/100 = 10%

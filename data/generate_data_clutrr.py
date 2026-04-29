@@ -47,7 +47,9 @@ def problem_to_record(p: Problem, idx: int, split: str) -> dict:
     }
 
 
-def gen_split(n: int, ks: list[int], seed_offset: int, split: str) -> list[dict]:
+def gen_split(n: int, ks: list[int], seed_offset: int, split: str,
+              n_distractor_entities: int = 0,
+              n_distractor_edges: int = 0) -> list[dict]:
     out: list[dict] = []
     di = 0
     seed = seed_offset
@@ -55,7 +57,11 @@ def gen_split(n: int, ks: list[int], seed_offset: int, split: str) -> list[dict]
         k = ks[di % len(ks)]
         di += 1
         try:
-            p = generate_problem(k=k, seed=seed)
+            p = generate_problem(
+                k=k, seed=seed,
+                n_distractor_entities=n_distractor_entities,
+                n_distractor_edges=n_distractor_edges,
+            )
             out.append(problem_to_record(p, len(out), split))
         except RuntimeError:
             pass
@@ -69,24 +75,39 @@ def main():
     ap.add_argument("--n_train", type=int, default=2000)
     ap.add_argument("--n_val", type=int, default=200)
     ap.add_argument("--n_test", type=int, default=200)
-    ap.add_argument("--ks", default="2,3,4")
+    # Per-split chain-length distributions. Held-out-depth probe:
+    # default train on k=2,3 only; test on k=4 only.
+    ap.add_argument("--ks_train", default="2,3")
+    ap.add_argument("--ks_val", default="2,3")
+    ap.add_argument("--ks_test", default="4")
+    # Distractor knobs (applied to all splits).
+    ap.add_argument("--n_distractor_entities", type=int, default=2)
+    ap.add_argument("--n_distractor_edges", type=int, default=2)
     ap.add_argument("--seed_base", type=int, default=9101)
     args = ap.parse_args()
 
-    ks = [int(x) for x in args.ks.split(",")]
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     splits = [
-        ("train", args.n_train, args.seed_base),
-        ("val", args.n_val, args.seed_base + 100_000),
-        ("test", args.n_test, args.seed_base + 200_000),
+        ("train", args.n_train, args.seed_base,
+         [int(x) for x in args.ks_train.split(",")]),
+        ("val", args.n_val, args.seed_base + 100_000,
+         [int(x) for x in args.ks_val.split(",")]),
+        ("test", args.n_test, args.seed_base + 200_000,
+         [int(x) for x in args.ks_test.split(",")]),
     ]
-    for split, n, seed in splits:
+    for split, n, seed, ks in splits:
         if n <= 0:
             continue
-        print(f"Generating clutrr/{split}: n={n}, k in {ks}", flush=True)
-        recs = gen_split(n=n, ks=ks, seed_offset=seed, split=split)
+        print(f"Generating clutrr/{split}: n={n}, k in {ks}, "
+              f"d_ent={args.n_distractor_entities}, "
+              f"d_edge={args.n_distractor_edges}", flush=True)
+        recs = gen_split(
+            n=n, ks=ks, seed_offset=seed, split=split,
+            n_distractor_entities=args.n_distractor_entities,
+            n_distractor_edges=args.n_distractor_edges,
+        )
         path = out_dir / f"clutrr_{split}.jsonl"
         with open(path, "w") as f:
             for r in recs:

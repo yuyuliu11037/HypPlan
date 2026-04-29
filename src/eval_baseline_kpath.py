@@ -39,11 +39,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _gen(model, tok, prompt: str, max_new_tokens: int, temperature: float,
-          device, num_samples: int) -> list[str]:
+          device, num_samples: int) -> tuple[list[str], int, float]:
     """Generate `num_samples` completions from `prompt`. For temp=0, single
-    deterministic sample; otherwise sample with temperature."""
+    deterministic sample; otherwise sample with temperature.
+
+    Returns (decoded_texts, total_generated_tokens, latency_seconds).
+    """
     ids = tok.encode(prompt, return_tensors="pt").to(device)
     do_sample = temperature > 0
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
     out = model.generate(
         ids,
         max_new_tokens=max_new_tokens,
@@ -53,13 +59,19 @@ def _gen(model, tok, prompt: str, max_new_tokens: int, temperature: float,
         num_return_sequences=num_samples if do_sample else 1,
         pad_token_id=tok.eos_token_id,
     )
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    latency = time.perf_counter() - t0
     decoded = []
     plen = ids.size(1)
+    n_gen_tokens = 0
     for s in out:
-        decoded.append(tok.decode(s[plen:], skip_special_tokens=True))
+        gen_ids = s[plen:]
+        n_gen_tokens += int((gen_ids != tok.pad_token_id).sum().item())
+        decoded.append(tok.decode(gen_ids, skip_special_tokens=True))
     if not do_sample and num_samples > 1:
         decoded = decoded * num_samples
-    return decoded
+    return decoded, n_gen_tokens, latency
 
 
 # ---------------------------- Task scoring dispatch ----------------------------
@@ -96,6 +108,9 @@ def score_one(task: str, gen: str, rec: dict) -> tuple[bool, dict]:
         # arithmetic simulation.
         from src.score_ood import score_g24 as score
         return score(gen, rec)
+    if task == "nqueens":
+        from src.score_ood import score_nqueens
+        return score_nqueens(gen, rec)
     raise ValueError(task)
 
 
@@ -133,6 +148,10 @@ def extract_answer_key(task: str, gen: str, rec: dict):
         import re
         m = re.search(r"Answer\s*[:\-]?\s*(-?\d+)", gen)
         return int(m.group(1)) if m else None
+    if task == "nqueens":
+        from src.oracle_nqueens import parse_solution
+        sol = parse_solution(gen)
+        return tuple(sol) if sol else None
     return None
 
 
@@ -179,7 +198,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True,
                      choices=["pq", "bw", "gc", "rulechain", "clutrr",
-                              "proofwriter", "numpath", "g24", "synthlogic"])
+                              "proofwriter", "numpath", "g24", "synthlogic",
+                              "nqueens"])
     ap.add_argument("--mode", required=True,
                      choices=["greedy", "tot", "sc"])
     ap.add_argument("--test_data", required=True)
@@ -207,18 +227,33 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    if args.use_4bit:
+    is_mistral3 = "mistral-small-3" in args.base_model.lower()
+    is_gpt_oss = "gpt-oss" in args.base_model.lower()
+    if is_mistral3:
+        from transformers.models.mistral3 import (
+            Mistral3ForConditionalGeneration,
+        )
+        loader = Mistral3ForConditionalGeneration
+    else:
+        loader = AutoModelForCausalLM
+    # GPT-OSS ships pre-quantized with mxfp4 — skip bnb to avoid double-quant.
+    use_bnb = bool(args.use_4bit) and not is_gpt_oss
+    if use_bnb:
         from transformers import BitsAndBytesConfig
         bnb_cfg = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
-        model = AutoModelForCausalLM.from_pretrained(
+        model = loader.from_pretrained(
             args.base_model, trust_remote_code=True, device_map="auto",
             quantization_config=bnb_cfg,
         )
+    elif is_gpt_oss:
+        model = loader.from_pretrained(
+            args.base_model, trust_remote_code=True, device_map="auto",
+        )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = loader.from_pretrained(
             args.base_model, trust_remote_code=True,
             torch_dtype=torch.bfloat16,
         ).to(device)
@@ -237,12 +272,17 @@ def main():
     with open(out_path, "w") as fout, torch.no_grad():
         for i, rec in enumerate(records):
             prompt = build_prompt(args.task, rec, tok)
+            if is_gpt_oss:
+                prompt = prompt + "<|channel|>final<|message|>"
 
             top1_gen = ""
             top1_ok = False
+            top1_tokens = 0
+            top1_latency = 0.0
             if args.mode in ("greedy", "tot"):
-                top1_gens = _gen(model, tok, prompt,
-                                  args.max_new_tokens, 0.0, device, 1)
+                top1_gens, top1_tokens, top1_latency = _gen(
+                    model, tok, prompt, args.max_new_tokens, 0.0, device, 1,
+                )
                 top1_gen = top1_gens[0]
                 top1_ok, _ = score_one(args.task, top1_gen, rec)
                 if top1_ok:
@@ -250,10 +290,13 @@ def main():
 
             sample_gens: list[str] = []
             sample_oks: list[bool] = []
+            sc_tokens = 0
+            sc_latency = 0.0
             if args.mode in ("tot", "sc"):
-                sample_gens = _gen(model, tok, prompt,
-                                    args.max_new_tokens, args.temperature,
-                                    device, args.K)
+                sample_gens, sc_tokens, sc_latency = _gen(
+                    model, tok, prompt, args.max_new_tokens, args.temperature,
+                    device, args.K,
+                )
                 sample_oks = []
                 for g in sample_gens:
                     ok, _ = score_one(args.task, g, rec)
@@ -285,6 +328,8 @@ def main():
                 "n_samples": len(sample_gens),
                 "top1_gen": top1_gen[:600] if top1_gen else None,
                 "sample_gens": [g[:600] for g in sample_gens],
+                "n_gen_tokens": int(top1_tokens + sc_tokens),
+                "latency_s": float(top1_latency + sc_latency),
                 "sample_oks": sample_oks,
             }) + "\n")
             fout.flush()

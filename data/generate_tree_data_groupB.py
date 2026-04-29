@@ -129,13 +129,26 @@ def _build_problem_and_render(task: str, rec: dict):
         texts = [render_state(p, n.state) for n in tree.nodes]
         return p, tree, texts
 
+    if task == "nqueens":
+        from src.oracle_nqueens import (
+            Problem, enumerate_tree, render_state,
+        )
+        p = Problem(
+            N=int(rec["N"]),
+            prefix=tuple(rec.get("prefix", [])),
+        )
+        # Cap size for big N=8 with k=0 prefix.
+        tree = enumerate_tree(p, max_nodes=2000)
+        texts = [render_state(p, n.state) for n in tree.nodes]
+        return p, tree, texts
+
     raise ValueError(f"Unknown task: {task}")
 
 
 def _is_success(task: str, node) -> bool:
     """Map task-specific terminal-success predicate to the unified field."""
     if task in ("rulechain", "synthlogic", "lineq", "proofwriter",
-                 "numpath"):
+                 "numpath", "nqueens"):
         return node.is_solved
     if task == "clutrr":
         return node.is_solved
@@ -187,7 +200,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True,
                      choices=["rulechain", "synthlogic", "clutrr", "lineq",
-                              "proofwriter", "numpath"])
+                              "proofwriter", "numpath", "nqueens"])
     ap.add_argument("--data_prefix", default=None,
                      help="Override default data/{task}. Used for reading "
                           "data/{prefix}_{split}.jsonl instead.")

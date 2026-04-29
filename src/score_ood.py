@@ -330,6 +330,25 @@ def score_clutrr(gen: str, record: dict) -> tuple[bool, dict]:
     return ok, {"pred": pred, "gold": gold}
 
 
+def score_nqueens(gen: str, record: dict) -> tuple[bool, dict]:
+    """N-Queens: parse Solution: [c1, ..., cN] from generation; verify (i)
+    length=N, (ii) prefix preserved, (iii) full placement is valid (no
+    column or diagonal conflicts)."""
+    from src.oracle_nqueens import parse_solution, score_solution
+    N = int(record["N"])
+    prefix = list(record.get("prefix", []))
+    sol = parse_solution(gen)
+    if sol is None:
+        return False, {"pred": None, "reason": "no_parse"}
+    if len(sol) != N:
+        return False, {"pred": sol, "reason": f"len={len(sol)} != {N}"}
+    if list(sol[: len(prefix)]) != prefix:
+        return False, {"pred": sol, "reason": "prefix_mismatch"}
+    if not score_solution(N, sol):
+        return False, {"pred": sol, "reason": "invalid_placement"}
+    return True, {"pred": sol}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True,

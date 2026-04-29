@@ -1112,6 +1112,129 @@ class ProofWriterAdapter:
         return f"Step {step_num}:"
 
 
+class NQueensAdapter:
+    """Adapter for N-Queens with optional pre-placed queens.
+
+    Record schema: {"id", "N", "k", "prefix": list[int], "gold_extension": list[int]}
+    State = tuple of column placements (1-indexed) for rows 1..len(state).
+    Action = column number (int) chosen for the next row.
+    """
+    name = "nqueens"
+    BOUNDARY_RE = BOUNDARY_RE
+    TERMINAL_RE = re.compile(r"Solution\s*[:=]?\s*\[", re.IGNORECASE)
+
+    def __init__(self, rec: dict):
+        from src.oracle_nqueens import Problem
+        self.rec = rec
+        self.problem = Problem(N=int(rec["N"]),
+                                prefix=tuple(rec.get("prefix", [])))
+        self._tree = None
+
+    @property
+    def initial_state(self):
+        return self.problem.initial_state()
+
+    def _tree_lazy(self):
+        if self._tree is None:
+            from src.oracle_nqueens import enumerate_tree
+            self._tree = enumerate_tree(self.problem, max_nodes=4000)
+        return self._tree
+
+    def winning_steps(self, state):
+        """Return list of (col_int, new_state) pairs. The framework expects
+        each item to be (action_data, new_state); for N-Queens the
+        action_data is just the column int placed at the next row."""
+        from src.oracle_nqueens import winning_steps as ws
+        out = []
+        for col, new_state in ws(state, self.problem):
+            out.append((col, new_state))
+        return out
+
+    def validate_apply(self, state, action):
+        """`action` shape: (col_int, new_state). Returns (ok, new_state)."""
+        from src.oracle_nqueens import validate_step
+        col, _ = action
+        ok, ns = validate_step(state, col, self.problem)
+        return ok, ns
+
+    def is_solved(self, state):
+        from src.oracle_nqueens import is_solved
+        return is_solved(state, self.problem)
+
+    def is_terminal(self, state):
+        return self.is_solved(state)
+
+    def render_state(self, state, history):
+        from src.oracle_nqueens import render_state
+        return render_state(self.problem, state)
+
+    def _action_text(self, action):
+        col, _ = action
+        next_row = "?"  # not used outside step formatting
+        return f"col {col}"
+
+    def parse_step(self, step_body: str, state, history):
+        """Returns ((col_int, new_state), step_body) so the framework
+        unpacks `action = (col_int, new_state)` consistently with
+        winning_steps."""
+        from src.oracle_nqueens import parse_step as ps
+        col = ps(step_body, self.problem, state)
+        if col is None:
+            return None
+        ns = state + (col,)
+        return ((col, ns), step_body.strip())
+
+    def format_step_text(self, state_before, action, state_after,
+                          step_num, max_steps):
+        col, _ = action
+        next_row = len(state_before) + 1
+        body = f"Place queen in row {next_row} at column {col}"
+        if self.is_solved(state_after):
+            sol_str = ", ".join(str(c) for c in state_after)
+            return f" {body}. Solution: [{sol_str}]"
+        tail = ""
+        next_n = step_num + 1
+        if next_n <= max_steps:
+            tail = f"\nStep {next_n}:"
+        return f" {body}." + tail
+
+    def make_prompt(self, tokenizer):
+        sys = ("You will solve an N-Queens puzzle. Place N queens on an "
+                "N x N board, one per row, so that no two queens share "
+                "the same column or diagonal. At each step, place a queen "
+                "in the next empty row at a valid column (1-indexed). "
+                "Output format:\n"
+                "  Step 1: Place queen in row 1 at column c1.\n"
+                "  Step 2: Place queen in row 2 at column c2.\n"
+                "  ...\n"
+                "  Step N: Place queen in row N at column cN. "
+                "Solution: [c1, c2, ..., cN]")
+        N = self.problem.N
+        if self.problem.prefix:
+            pre = "Already-placed queens:\n" + "\n".join(
+                f"  row {r} col {c}"
+                for r, c in enumerate(self.problem.prefix, 1))
+        else:
+            pre = "No queens placed yet."
+        user = f"Board size: {N}x{N}\n{pre}"
+        msgs = [{"role": "system", "content": sys},
+                 {"role": "user", "content": user}]
+        text = tokenizer.apply_chat_template(msgs, tokenize=False,
+                                               add_generation_prompt=True)
+        return text, False
+
+    def step_priming_prefix(self, step_num):
+        """Step number = ACTION index (1-indexed), NOT row number.
+
+        Training convention (see train_stage2_dagger_ood.py format_step_text
+        call): for prefixed problems, "Step 1" is the first model action,
+        which places at row len(prefix)+1. The user-message of make_prompt
+        already conveys pre-placed queens; do not render them in the
+        assistant priming, which would create a format the model never
+        saw during training."""
+        return f"Step {step_num}:"
+
+
 ADAPTERS = {
     "pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
     "gc": GraphColorAdapter,
@@ -1121,4 +1244,5 @@ ADAPTERS = {
     "lineq": LinearEqAdapter,
     "numpath": NumPathAdapter,
     "proofwriter": ProofWriterAdapter,
+    "nqueens": NQueensAdapter,
 }

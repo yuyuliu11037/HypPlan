@@ -1,2 +1,0 @@
-task=proofwriter mode=tot n=200
-  top1: 138/200 = 69%

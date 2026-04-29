@@ -133,7 +133,7 @@ def main():
             elif args.task == "gc":
                 ok = bool(r.solved)
             elif args.task in ("rulechain", "synthlogic", "clutrr",
-                                "lineq", "proofwriter"):
+                                "lineq", "proofwriter", "nqueens"):
                 # All Group B tasks: solved iff adapter.is_solved on
                 # final state. rollout_one already checks this.
                 ok = bool(r.solved)

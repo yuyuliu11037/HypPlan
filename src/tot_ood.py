@@ -398,8 +398,327 @@ class GraphColorAdapter(Adapter):
         return score_coloring(self.problem, c)
 
 
+# ---------- ProofWriter adapter ----------
+
+_PW_PROPOSE_HEADER = (
+    "You will derive new facts step by step from the rules, then conclude "
+    "with the answer (True or False). Each step uses one rule and one or "
+    "more previously known facts.\n"
+    "Propose 3 different sensible next-line candidates for the derivation "
+    "below. Output exactly 3 lines (no numbering, no commentary). Each "
+    "line must be either\n"
+    "  Step N: apply ruleM: <derived fact in NL>.\n"
+    "or\n"
+    "  Answer: True\n"
+    "or\n"
+    "  Answer: False\n"
+    "If the question's statement is already in the initial facts (or "
+    "trivially negated under the closed-world assumption), output "
+    "'Answer: True' or 'Answer: False' directly.\n\n"
+)
+
+_PW_VALUE_HEADER = (
+    "Given the theory (initial facts + rules) and the target question, "
+    "decide whether the partial derivation is on track to arrive at the "
+    "correct True/False conclusion. Reply with EXACTLY one of: sure / "
+    "likely / impossible. No other text.\n\n"
+)
+
+
+class ProofWriterAdapter(Adapter):
+    name = "proofwriter"
+    max_depth = 12
+
+    def __init__(self, rec: dict) -> None:
+        super().__init__(rec)
+        self.theory = rec["theory_text"]
+        self.target = rec["target_text"]
+        self.gold_answer = bool(rec["answer"])
+
+    def _common(self) -> str:
+        return (f"Theory:\n{self.theory}\n\n"
+                f"Question: is the following true? "
+                f"{self.target}\n\n")
+
+    def propose_prompt(self, partial: str) -> str:
+        body = self._common()
+        n_so_far = len(re.findall(r"^Step\s+\d+:", partial, re.MULTILINE))
+        next_n = n_so_far + 1
+        if partial:
+            body += "Derivation so far:\n" + partial
+        else:
+            body += "Derivation so far: (none)\n"
+        body += f"\nStep {next_n}:"
+        return _PW_PROPOSE_HEADER + body
+
+    def value_prompt(self, partial: str) -> str:
+        body = self._common()
+        body += "Partial derivation:\n" + (partial if partial else "(none)\n")
+        body += "\nEvaluation:"
+        return _PW_VALUE_HEADER + body
+
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
+        out: list[str] = []
+        for ln in gen.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            ln = re.sub(r"^[\-\*\d\.]+\s*", "", ln)
+            m_ans = re.match(r"^Answer:\s*(True|False)\b", ln, re.I)
+            if m_ans:
+                out.append(f"Answer: "
+                           f"{m_ans.group(1).capitalize()}")
+                continue
+            if re.match(r"^Step\s+\d+:\s*apply\s+rule\d+", ln, re.I):
+                out.append(ln.rstrip())
+        return out
+
+    def is_terminal(self, partial: str) -> bool:
+        return bool(re.search(r"Answer:\s*(True|False)\b", partial,
+                                re.IGNORECASE))
+
+    def is_correct(self, partial: str) -> bool:
+        m = re.search(r"Answer:\s*(True|False)\b", partial, re.IGNORECASE)
+        if not m:
+            return False
+        return (m.group(1).lower() == "true") == self.gold_answer
+
+
+# ---------- N-Queens adapter ----------
+
+_NQ_PROPOSE_HEADER = (
+    "Place N queens on an N x N board, one per row, so that no two queens "
+    "share the same column or diagonal.\n"
+    "Propose 3 different sensible next-line candidates for the partial "
+    "placement below. Output exactly 3 lines (no numbering, no commentary). "
+    "Each line must be either\n"
+    "  Step k: Place queen in row k at column c.\n"
+    "or, when all rows are placed,\n"
+    "  Solution: [c1, c2, ..., cN]\n\n"
+)
+
+_NQ_VALUE_HEADER = (
+    "Given the board size (N) and the partial placement of queens, decide "
+    "whether continuing this placement will yield a valid full N-queens "
+    "solution. Reply with EXACTLY one of: sure / likely / impossible. "
+    "No other text.\n\n"
+)
+
+
+class NQueensAdapter(Adapter):
+    name = "nqueens"
+    max_depth = 16
+
+    def __init__(self, rec: dict) -> None:
+        super().__init__(rec)
+        from src.oracle_nqueens import Problem
+        self.N = int(rec["N"])
+        self.problem = Problem(N=self.N,
+                                prefix=tuple(rec.get("prefix", [])))
+
+    def init_partial(self) -> str:
+        # Pre-render the pre-placed prefix as Step lines so the model
+        # continues from row k+1.
+        if not self.problem.prefix:
+            return ""
+        lines = []
+        for r, c in enumerate(self.problem.prefix, 1):
+            lines.append(f"Step {r}: Place queen in row {r} at column {c}.")
+        return "\n".join(lines)
+
+    def _common(self) -> str:
+        if self.problem.prefix:
+            pre = "\nPre-placed queens (rows 1.." + str(len(self.problem.prefix)) + "):\n"
+            for r, c in enumerate(self.problem.prefix, 1):
+                pre += f"  row {r} col {c}\n"
+        else:
+            pre = "\nNo queens placed yet.\n"
+        return f"Board size N = {self.N}.{pre}\n"
+
+    def _placed_columns(self, partial: str) -> list[int]:
+        cols: list[int] = []
+        for ln in partial.splitlines():
+            m = re.search(r"row\s+\d+\s+at\s+column\s+(\d+)", ln,
+                          re.IGNORECASE)
+            if m:
+                cols.append(int(m.group(1)))
+        return cols
+
+    def propose_prompt(self, partial: str) -> str:
+        body = self._common()
+        n_so_far = len(self._placed_columns(partial))
+        next_n = n_so_far + 1
+        if partial:
+            body += "Placements so far:\n" + partial
+        else:
+            body += "Placements so far: (none)\n"
+        if next_n <= self.N:
+            body += f"\nStep {next_n}:"
+        else:
+            body += "\nSolution:"
+        return _NQ_PROPOSE_HEADER + body
+
+    def value_prompt(self, partial: str) -> str:
+        body = self._common()
+        body += "Partial placement:\n" + (partial if partial else "(none)\n")
+        body += "\nEvaluation:"
+        return _NQ_VALUE_HEADER + body
+
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
+        """Lenient step extractor for N-Queens. Accepts:
+          - 'Step N: Place queen in row N at column C.'
+          - 'Step N:' followed by anything (loose; column might be inferred)
+          - bare 'Place queen in row N at column C.' (when prompt primed Step N:)
+          - 'Solution: [...]' (terminal)
+        """
+        out: list[str] = []
+        n_so_far = len(self._placed_columns(partial))
+        next_n = n_so_far + 1
+        for ln in gen.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            ln = re.sub(r"^[\-\*\d\.]+\s*", "", ln)
+            if re.match(r"^Solution\s*[:=]?\s*\[", ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+                continue
+            if re.match(r"^Step\s+\d+:\s*Place\s+queen", ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+                continue
+            # Bare "Place queen in row N at column C." — model continued
+            # the priming "Step N:" without re-emitting the prefix.
+            if re.match(r"^Place\s+queen\s+in\s+row\s+\d+\s+at\s+column\s+\d+",
+                         ln, re.IGNORECASE):
+                out.append(f"Step {next_n}: {ln.rstrip()}")
+                continue
+            # Bare "row N col C" or "column C" if it has digits
+            m = re.match(r"^(?:row\s+\d+\s+(?:at\s+)?)?col(?:umn)?\s*[:=]?\s*(\d+)",
+                          ln, re.IGNORECASE)
+            if m:
+                c = int(m.group(1))
+                out.append(f"Step {next_n}: Place queen in row {next_n} "
+                           f"at column {c}.")
+                continue
+        return out
+
+    def is_terminal(self, partial: str) -> bool:
+        if re.search(r"Solution\s*[:=]?\s*\[", partial, re.IGNORECASE):
+            return True
+        # Also terminal if N rows placed
+        return len(self._placed_columns(partial)) >= self.N
+
+    def is_correct(self, partial: str) -> bool:
+        from src.oracle_nqueens import parse_solution, score_solution
+        sol = parse_solution(partial)
+        if sol is None:
+            # Fall back: extract column list directly from Step lines
+            cols = self._placed_columns(partial)
+            if len(cols) == self.N:
+                sol = cols
+        if sol is None or len(sol) != self.N:
+            return False
+        # Prefix must be preserved
+        if list(sol[: len(self.problem.prefix)]) != list(self.problem.prefix):
+            return False
+        return score_solution(self.N, sol)
+
+
+# ---------- CLUTRR adapter ----------
+
+_CLUTRR_PROPOSE_HEADER = (
+    "You will solve a kinship-composition puzzle. Given a list of family "
+    "facts, derive how the queried head is related to the queried tail by "
+    "composing facts step by step.\n"
+    "Propose 3 different sensible next-line candidates for the derivation "
+    "below. Output exactly 3 lines (no numbering, no commentary). Each "
+    "line must be either\n"
+    "  Step N: <Head> is the <relation> of <Person>.\n"
+    "or, when ready,\n"
+    "  Answer: <Head> is the <kinship-relation> of <Tail>.\n\n"
+)
+
+_CLUTRR_VALUE_HEADER = (
+    "Given the family facts and the partial kinship derivation, decide "
+    "whether continuing it will arrive at the correct relation between "
+    "the queried head and tail. Reply with EXACTLY one of: sure / likely "
+    "/ impossible. No other text.\n\n"
+)
+
+
+class CLUTRRAdapter(Adapter):
+    name = "clutrr"
+    max_depth = 8
+
+    def __init__(self, rec: dict) -> None:
+        super().__init__(rec)
+        self.entities = rec["entities"]
+        self.edges = rec["edges"]
+        self.query = rec["query"]
+        self.gold_answer = rec["answer"]
+        # Pre-render the facts + question.
+        head_idx, tail_idx = self.query
+        self.head_name = self.entities[head_idx]
+        self.tail_name = self.entities[tail_idx]
+
+    def _facts_text(self) -> str:
+        lines = []
+        for src, rel, dst in self.edges:
+            lines.append(f"{self.entities[src]} is the {rel} of "
+                         f"{self.entities[dst]}.")
+        return "\n".join(lines)
+
+    def _common(self) -> str:
+        return (f"Family facts:\n{self._facts_text()}\n\n"
+                f"Question: How is {self.head_name} related to "
+                f"{self.tail_name}?\n\n")
+
+    def propose_prompt(self, partial: str) -> str:
+        body = self._common()
+        n_so_far = len(re.findall(r"^Step\s+\d+:", partial, re.MULTILINE))
+        next_n = n_so_far + 1
+        if partial:
+            body += "Derivation so far:\n" + partial
+        else:
+            body += "Derivation so far: (none)\n"
+        body += f"\nStep {next_n}:"
+        return _CLUTRR_PROPOSE_HEADER + body
+
+    def value_prompt(self, partial: str) -> str:
+        body = self._common()
+        body += "Partial derivation:\n" + (partial if partial else "(none)\n")
+        body += "\nEvaluation:"
+        return _CLUTRR_VALUE_HEADER + body
+
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
+        out: list[str] = []
+        for ln in gen.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            ln = re.sub(r"^[\-\*\d\.]+\s*", "", ln)
+            if re.match(r"^Answer\s*[:=]?\s*", ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+                continue
+            if re.match(r"^Step\s+\d+:\s*\w+\s+is\s+the\s+\w",
+                         ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+        return out
+
+    def is_terminal(self, partial: str) -> bool:
+        return bool(re.search(r"^Answer\s*[:=]?\s*", partial,
+                                re.IGNORECASE | re.MULTILINE))
+
+    def is_correct(self, partial: str) -> bool:
+        from src.oracle_clutrr import parse_answer, score_answer
+        pred = parse_answer(partial)
+        return score_answer(pred, self.gold_answer)
+
+
 ADAPTERS = {"pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
-             "gc": GraphColorAdapter}
+             "gc": GraphColorAdapter,
+             "proofwriter": ProofWriterAdapter,
+             "nqueens": NQueensAdapter,
+             "clutrr": CLUTRRAdapter}
 
 
 # ---------- Generic ToT BFS ----------
@@ -565,6 +884,12 @@ def main() -> None:
 
     AdapterCls = ADAPTERS[args.task]
 
+    out_path = Path(args.output)
+    if args.shard_world > 1:
+        out_path = out_path.with_name(
+            f"{out_path.stem}_shard{args.shard_rank}{out_path.suffix}"
+        )
+    args.output = str(out_path)
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     n_top1 = 0
     n_any = 0

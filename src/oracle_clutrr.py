@@ -249,13 +249,19 @@ def generate_problem(
     k: int,
     seed: int = 0,
     max_attempts: int = 200,
+    n_distractor_entities: int = 0,
+    n_distractor_edges: int = 0,
 ) -> Problem:
     """Generate a CLUTRR-like problem with a length-`k` kinship chain and a
     composition query for the head-to-tail relation.
 
-    Difficulty knob: `k` (number of hops). k=2 is the easy end (single
-    composition); k=4 is the hard end (4 chained compositions, each of
-    which must be defined in `RELATION_COMPOSITION`)."""
+    Difficulty knobs:
+        `k` — number of hops along the answer chain.
+        `n_distractor_entities` — extra entities not on the answer path.
+        `n_distractor_edges` — extra kinship edges among the *off-path*
+            entities (or attaching them to one chain entity), so the
+            model can no longer assume "every edge is on the path".
+    """
     if k < 2:
         raise ValueError("k must be >= 2")
     rng = random.Random(seed)
@@ -265,20 +271,60 @@ def generate_problem(
         if answer is None:
             continue
         used: set[str] = set()
-        entities = tuple(_random_name(rng, used) for _ in range(k + 1))
-        # entities[i] is `chain[i]` of entities[i+1].
-        edges = tuple(
+        chain_entities = tuple(
+            _random_name(rng, used) for _ in range(k + 1)
+        )
+        # chain_entities[i] is `chain[i]` of chain_entities[i+1].
+        path_edges = tuple(
             (i, chain[i], i + 1) for i in range(k)
         )
-        # Shuffle edge presentation order so the model can't just walk
-        # left-to-right (matches CLUTRR's narration permutation).
-        edge_order = list(range(k))
-        rng.shuffle(edge_order)
-        edges_shuffled = tuple(edges[i] for i in edge_order)
+
+        # Distractor entities (off the answer path).
+        n_extra = max(0, int(n_distractor_entities))
+        extras = tuple(
+            _random_name(rng, used) for _ in range(n_extra)
+        )
+        all_entities = chain_entities + extras
+        chain_idx_set = set(range(len(chain_entities)))
+        extra_idx_set = set(range(
+            len(chain_entities), len(chain_entities) + len(extras)
+        ))
+
+        # Distractor edges. We pick (head, rel, tail) such that the edge
+        # does NOT shorten or fork the answer path:
+        #   - both endpoints are extras (off-path subgraph), OR
+        #   - one endpoint is an extra and the other is a chain entity.
+        # We never connect two non-adjacent chain entities directly,
+        # which would shortcut the answer chain.
+        n_dedge = max(0, int(n_distractor_edges))
+        distractor_edges: list[tuple[int, str, int]] = []
+        attempts_d = 0
+        while (
+            len(distractor_edges) < n_dedge
+            and attempts_d < n_dedge * 20
+            and (extras or False)
+        ):
+            attempts_d += 1
+            # require at least one extra endpoint
+            if extras:
+                a = rng.choice(list(extra_idx_set))
+                b_pool = list(extra_idx_set | chain_idx_set)
+                b_pool.remove(a)
+                b = rng.choice(b_pool)
+                rel = rng.choice(CHAIN_RELATIONS)
+                edge = (a, rel, b)
+                # avoid duplicates / inverse-of-existing
+                if edge not in distractor_edges:
+                    distractor_edges.append(edge)
+
+        # Shuffle full edge list so distractors interleave with path
+        # edges in the prompt narration.
+        full_edges = list(path_edges) + distractor_edges
+        rng.shuffle(full_edges)
         return Problem(
-            entities=entities,
-            edges=edges_shuffled,
-            query=(0, k),
+            entities=all_entities,
+            edges=tuple(full_edges),
+            query=(0, k),  # head = chain_entities[0], tail = chain_entities[k]
             answer=answer,
             chain=chain,
         )

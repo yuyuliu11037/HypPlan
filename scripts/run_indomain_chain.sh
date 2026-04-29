@@ -45,16 +45,16 @@ eval_indomain() {
     return
   fi
   echo "=== ${task} in-domain eval ==="
-  GPUS=(1 2 3 4 6 7)
+  GPUS=(3 4 6 7)
   declare -a PIDS
-  for i in 0 1 2 3 4 5; do
+  for i in 0 1 2 3; do
     local GPU=${GPUS[$i]}
     CUDA_VISIBLE_DEVICES=$GPU nohup python3.10 -m src.eval_stage2_indomain \
       --task "$task" \
       --ckpt_dir "$lora_dir" --head_path "$head_path" \
       --test_data "$test_data" \
       --output "${result%.jsonl}_shard${i}.jsonl" \
-      --shard_rank $i --shard_world 6 \
+      --shard_rank $i --shard_world 4 \
       > "$LOG_DIR/${task}_indomain_eval_shard${i}.log" 2>&1 &
     PIDS[$i]=$!
   done
@@ -112,27 +112,11 @@ train_stage2() {
       2>&1 | tee "$LOG_DIR/stage2_${task}.log"
 }
 
-# ---------- Phase 0: kick off long tree-data jobs in background ----------
+# ---------- Phase 0: tree-data already cached for both numpath + proofwriter
+# (skipped — generated in earlier sessions; re-running would conflict with
+#  other GPU users)
 NUMPATH_TREE_PID=""
 PROOFWRITER_TREE_PID=""
-if [ ! -d "data/numpath_trees_qwen14b/test" ] || \
-   [ "$(ls data/numpath_trees_qwen14b/test/problem_*.pt 2>/dev/null | wc -l)" -lt 200 ]; then
-  echo "=== launching numpath tree-data on GPU 1 (background) ==="
-  CUDA_VISIBLE_DEVICES=1 nohup python -m data.generate_tree_data_groupB \
-    --task numpath --splits train,val,test \
-    > "$LOG_DIR/treedata_numpath.log" 2>&1 &
-  NUMPATH_TREE_PID=$!
-  echo "  PID $NUMPATH_TREE_PID"
-fi
-if [ ! -d "data/proofwriter_trees_qwen14b/test" ] || \
-   [ "$(ls data/proofwriter_trees_qwen14b/test/problem_*.pt 2>/dev/null | wc -l)" -lt 200 ]; then
-  echo "=== launching proofwriter tree-data on GPU 2 (background) ==="
-  CUDA_VISIBLE_DEVICES=2 nohup python -m data.generate_tree_data_groupB \
-    --task proofwriter --splits train,val,test \
-    > "$LOG_DIR/treedata_proofwriter.log" 2>&1 &
-  PROOFWRITER_TREE_PID=$!
-  echo "  PID $PROOFWRITER_TREE_PID"
-fi
 
 # ---------- Phase 1: rulechain head + Stage-2 + eval ----------
 train_head rulechain

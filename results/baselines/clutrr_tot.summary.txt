@@ -1,2 +1,0 @@
-task=clutrr mode=tot n=200
-  top1: 19/200 = 10%

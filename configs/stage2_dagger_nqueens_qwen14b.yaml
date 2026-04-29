@@ -1,0 +1,23 @@
+data:
+  train_data: data/nqueens_train.jsonl
+  test_data: data/nqueens_test.jsonl
+  train_limit: -1
+model:
+  base_model: Qwen/Qwen2.5-14B-Instruct
+  head_checkpoint: checkpoints/head_nqueens_qwen14b_rank/head.pt
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  up_proj_hidden: 2048
+training:
+  epochs: 2
+  grad_clip: 1.0
+  lr: 1.0e-4
+  rollout_max_new_tokens: 256
+  rollout_temperature: 0.7
+  rollout_top_p: 0.95
+  rollouts_per_problem: 2
+  max_steps_per_problem: 6
+  output_dir: checkpoints/dagger_stage2_nqueens_indomain
+  seed: 1234
+  weight_decay: 0.0

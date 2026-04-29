@@ -353,24 +353,31 @@ runs from this session; non-bold are bf16 from Group A v1 (HANDOFF.md).
 | B | **CLUTRR-like** | **13%** | this session, 4-bit, 30 records |
 | B | **ProofWriter** (CWA d3) | **70%** | this session, 4-bit, 200 records |
 
-### Tree of Thoughts (K=5, temp=0.7, top-1 greedy)
+### Tree of Thoughts (paper-faithful BFS, Yao et al. 2023)
 
-Structured chat-prompt with `Step 1:` priming. Reports top-1 (single
-greedy rollout under the structured prompt). The K=5 sampled
-trajectories were generated for completeness but the lenient any-of-K
-metric requires the gold label to select the "right" one and so isn't
-a deployable baseline; we don't report it.
+Real ToT: at each depth, GENERATOR produces `n_generate` candidates per
+current trajectory (T=0.7), EVALUATOR scores each with `n_evaluate=3`
+value calls (`sure/likely/impossible`), keep top `n_select=5` by score.
+Implemented per task via [src/tot_baseline.py](../src/tot_baseline.py)
+for G24 and [src/tot_ood.py](../src/tot_ood.py) for OOD tasks.
 
-| Group | Task | top-1 | n |
-|---|---|---|---|
-| A | 24 Game | 10% | 100 |
-| A | **Number-path** | **32%** | 200 |
-| A | Blocksworld | 58% | v1, 100 |
-| A | Graph Coloring | 34% | v1, 100 |
-| B | **rulechain** | **52%** | 600 |
-| B | ProntoQA | 41% | v1, 100 |
-| B | **CLUTRR-like** | **10%** | 200 |
-| B | **ProofWriter** | **69%** | 200 |
+| Group | Task | top-1 | n | Source |
+|---|---|---|---|---|
+| A | 24 Game | 1% | 100 | `tot_baseline_qwen14b/seed_1234/` |
+| A | **Number-path** | TBD | 200 | adapter pending |
+| A | Blocksworld | 58% | 100 | `tot_ood/bw/` |
+| A | Graph Coloring | 34% | 100 | `tot_ood/gc/` |
+| B | **rulechain** | TBD | 600 | adapter pending |
+| B | ProntoQA | 41% | 100 | `tot_ood/pq/` |
+| B | **CLUTRR-like** | TBD | 200 | adapter pending |
+| B | **ProofWriter** | TBD | 200 | adapter pending |
+
+Earlier numbers in this row labeled "ToT" for G24 / Number-path /
+rulechain / CLUTRR / ProofWriter were from a non-ToT runner
+(K-sample-with-Step-1-priming, not real propose+evaluate+select tree
+search) — those results were deleted on 2026-04-27. Real ToT adapters
+for the 4 TBD cells are pending; see "Planned: real ToT on 4 missing
+datasets" in [README.md](../README.md).
 
 ### Self-Consistency (K=5, temp=0.7, majority-vote)
 

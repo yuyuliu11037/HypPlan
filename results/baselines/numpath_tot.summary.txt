@@ -1,2 +1,0 @@
-task=numpath mode=tot n=200 K=5 temp=0.7
-  top1: 64/200 = 32%
