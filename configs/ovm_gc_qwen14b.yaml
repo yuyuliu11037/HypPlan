@@ -1,0 +1,17 @@
+model:
+  base_model: "Qwen/Qwen2.5-14B-Instruct"
+  lora_adapter: "checkpoints/sft_pt_gc_qwen14b/lora"
+data:
+  rollouts:
+    - "data/ovm/rollouts_gc_shard0.jsonl"
+    - "data/ovm/rollouts_gc_shard1.jsonl"
+  max_seq_len: 512
+training:
+  lr: 1.0e-4
+  epochs: 2
+  batch_size: 4
+  grad_accum: 4
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  grad_clip: 1.0
+  output_dir: "checkpoints/ovm_gc_qwen14b"

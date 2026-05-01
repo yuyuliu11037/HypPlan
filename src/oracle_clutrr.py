@@ -141,7 +141,141 @@ RELATION_COMPOSITION: dict[tuple[str, str], str] = {
     ("great-uncle", "daughter"): "first-cousin-once-removed",
     ("great-aunt", "son"): "first-cousin-once-removed",
     ("great-aunt", "daughter"): "first-cousin-once-removed",
+    # 5-hop direct-ancestor / direct-descendant (extends the great-* ladder
+    # one more level so k=5 chains using just mother/father/son/daughter
+    # compose cleanly).
+    ("great-great-grandmother", "mother"): "great-great-great-grandmother",
+    ("great-great-grandmother", "father"): "great-great-great-grandfather",
+    ("great-great-grandfather", "mother"): "great-great-great-grandmother",
+    ("great-great-grandfather", "father"): "great-great-great-grandfather",
+    ("great-great-grandson", "son"): "great-great-great-grandson",
+    ("great-great-grandson", "daughter"): "great-great-great-granddaughter",
+    ("great-great-granddaughter", "son"): "great-great-great-grandson",
+    ("great-great-granddaughter", "daughter"): "great-great-great-granddaughter",
+    # 5-hop side-branch (sibling-of-great-great-ancestor)
+    ("great-great-grandmother", "brother"): "great-great-great-uncle",
+    ("great-great-grandmother", "sister"): "great-great-great-aunt",
+    ("great-great-grandfather", "brother"): "great-great-great-uncle",
+    ("great-great-grandfather", "sister"): "great-great-great-aunt",
+    # 5-hop cousin (descendant-of-side-branch and ext. of once-removed)
+    ("great-great-uncle", "son"): "first-cousin-twice-removed",
+    ("great-great-uncle", "daughter"): "first-cousin-twice-removed",
+    ("great-great-aunt", "son"): "first-cousin-twice-removed",
+    ("great-great-aunt", "daughter"): "first-cousin-twice-removed",
+    ("first-cousin-once-removed", "son"): "first-cousin-twice-removed",
+    ("first-cousin-once-removed", "daughter"): "first-cousin-twice-removed",
+    # 6-hop direct-ancestor / direct-descendant
+    ("great-great-great-grandmother", "mother"): "great-great-great-great-grandmother",
+    ("great-great-great-grandmother", "father"): "great-great-great-great-grandfather",
+    ("great-great-great-grandfather", "mother"): "great-great-great-great-grandmother",
+    ("great-great-great-grandfather", "father"): "great-great-great-great-grandfather",
+    ("great-great-great-grandson", "son"): "great-great-great-great-grandson",
+    ("great-great-great-grandson", "daughter"): "great-great-great-great-granddaughter",
+    ("great-great-great-granddaughter", "son"): "great-great-great-great-grandson",
+    ("great-great-great-granddaughter", "daughter"): "great-great-great-great-granddaughter",
+    # 6-hop side-branch
+    ("great-great-great-grandmother", "brother"): "great-great-great-great-uncle",
+    ("great-great-great-grandmother", "sister"): "great-great-great-great-aunt",
+    ("great-great-great-grandfather", "brother"): "great-great-great-great-uncle",
+    ("great-great-great-grandfather", "sister"): "great-great-great-great-aunt",
+    # 6-hop cousin
+    ("great-great-great-uncle", "son"): "first-cousin-thrice-removed",
+    ("great-great-great-uncle", "daughter"): "first-cousin-thrice-removed",
+    ("great-great-great-aunt", "son"): "first-cousin-thrice-removed",
+    ("great-great-great-aunt", "daughter"): "first-cousin-thrice-removed",
+    ("first-cousin-twice-removed", "son"): "first-cousin-thrice-removed",
+    ("first-cousin-twice-removed", "daughter"): "first-cousin-thrice-removed",
+    # 7-hop direct-ancestor / direct-descendant
+    ("great-great-great-great-grandmother", "mother"): "great-great-great-great-great-grandmother",
+    ("great-great-great-great-grandmother", "father"): "great-great-great-great-great-grandfather",
+    ("great-great-great-great-grandfather", "mother"): "great-great-great-great-great-grandmother",
+    ("great-great-great-great-grandfather", "father"): "great-great-great-great-great-grandfather",
+    ("great-great-great-great-grandson", "son"): "great-great-great-great-great-grandson",
+    ("great-great-great-great-grandson", "daughter"): "great-great-great-great-great-granddaughter",
+    ("great-great-great-great-granddaughter", "son"): "great-great-great-great-great-grandson",
+    ("great-great-great-great-granddaughter", "daughter"): "great-great-great-great-great-granddaughter",
+    # 7-hop side-branch
+    ("great-great-great-great-grandmother", "brother"): "great-great-great-great-great-uncle",
+    ("great-great-great-great-grandmother", "sister"): "great-great-great-great-great-aunt",
+    ("great-great-great-great-grandfather", "brother"): "great-great-great-great-great-uncle",
+    ("great-great-great-great-grandfather", "sister"): "great-great-great-great-great-aunt",
+    # 7-hop cousin
+    ("great-great-great-great-uncle", "son"): "first-cousin-four-times-removed",
+    ("great-great-great-great-uncle", "daughter"): "first-cousin-four-times-removed",
+    ("great-great-great-great-aunt", "son"): "first-cousin-four-times-removed",
+    ("great-great-great-great-aunt", "daughter"): "first-cousin-four-times-removed",
+    ("first-cousin-thrice-removed", "son"): "first-cousin-four-times-removed",
+    ("first-cousin-thrice-removed", "daughter"): "first-cousin-four-times-removed",
 }
+
+
+# ---------------------- Programmatic depth extension ----------------------
+# Extend the great-* ladder, side-branch, and cousin-removed terms for
+# depths 8..12 so we can run depth-OOD tests at k=8, 10, 12. The patterns
+# are fully regular so we generate the entries in a loop instead of
+# enumerating them by hand.
+
+def _ladder(depth: int, base: str) -> str:
+    """For depth D >= 2, return ('great-' * (D-2)) + base.
+    e.g. (2,'grandmother')='grandmother', (3,'grandmother')='great-grandmother',
+    (5,'uncle')='great-great-great-uncle'."""
+    n = depth - 2
+    return ("great-" * n) + base
+
+
+_REMOVED_WORDS = {
+    1: "once", 2: "twice", 3: "thrice",
+    4: "four-times", 5: "five-times", 6: "six-times",
+    7: "seven-times", 8: "eight-times", 9: "nine-times",
+    10: "ten-times",
+}
+
+
+def _cousin(removed_count: int) -> str:
+    """removed_count=1 → 'first-cousin-once-removed' etc."""
+    return f"first-cousin-{_REMOVED_WORDS[removed_count]}-removed"
+
+
+for _D in range(8, 13):
+    _prev_gm = _ladder(_D - 1, "grandmother")
+    _prev_gf = _ladder(_D - 1, "grandfather")
+    _cur_gm = _ladder(_D, "grandmother")
+    _cur_gf = _ladder(_D, "grandfather")
+    # Direct-ancestor ladder
+    RELATION_COMPOSITION[(_prev_gm, "mother")] = _cur_gm
+    RELATION_COMPOSITION[(_prev_gm, "father")] = _cur_gf
+    RELATION_COMPOSITION[(_prev_gf, "mother")] = _cur_gm
+    RELATION_COMPOSITION[(_prev_gf, "father")] = _cur_gf
+    # Direct-descendant ladder
+    _prev_gs = _ladder(_D - 1, "grandson")
+    _prev_gd = _ladder(_D - 1, "granddaughter")
+    _cur_gs = _ladder(_D, "grandson")
+    _cur_gd = _ladder(_D, "granddaughter")
+    RELATION_COMPOSITION[(_prev_gs, "son")] = _cur_gs
+    RELATION_COMPOSITION[(_prev_gs, "daughter")] = _cur_gd
+    RELATION_COMPOSITION[(_prev_gd, "son")] = _cur_gs
+    RELATION_COMPOSITION[(_prev_gd, "daughter")] = _cur_gd
+    # Side-branch (sibling-of-ancestor at depth D-1 → depth-D uncle/aunt)
+    _cur_uncle = _ladder(_D, "uncle")
+    _cur_aunt = _ladder(_D, "aunt")
+    RELATION_COMPOSITION[(_prev_gm, "brother")] = _cur_uncle
+    RELATION_COMPOSITION[(_prev_gm, "sister")] = _cur_aunt
+    RELATION_COMPOSITION[(_prev_gf, "brother")] = _cur_uncle
+    RELATION_COMPOSITION[(_prev_gf, "sister")] = _cur_aunt
+    # Cousin: descendant-of-depth-(D-1) side-branch / extend "removed"
+    _cur_cousin = _cousin(_D - 3)
+    _prev_uncle = _ladder(_D - 1, "uncle")
+    _prev_aunt = _ladder(_D - 1, "aunt")
+    RELATION_COMPOSITION[(_prev_uncle, "son")] = _cur_cousin
+    RELATION_COMPOSITION[(_prev_uncle, "daughter")] = _cur_cousin
+    RELATION_COMPOSITION[(_prev_aunt, "son")] = _cur_cousin
+    RELATION_COMPOSITION[(_prev_aunt, "daughter")] = _cur_cousin
+    if _D - 4 in _REMOVED_WORDS:
+        _prev_cousin = _cousin(_D - 4)
+        RELATION_COMPOSITION[(_prev_cousin, "son")] = _cur_cousin
+        RELATION_COMPOSITION[(_prev_cousin, "daughter")] = _cur_cousin
+
+del _D
 
 
 def compose(r1: str, r2: str) -> Optional[str]:

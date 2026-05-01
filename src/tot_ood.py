@@ -714,11 +714,79 @@ class CLUTRRAdapter(Adapter):
         return score_answer(pred, self.gold_answer)
 
 
+_RC_PROPOSE_HEADER = (
+    "Apply rules to derive the target. Each step applies one rule.\n"
+    "Propose 3 different sensible next-line candidates. Output exactly "
+    "3 lines (no numbering, no commentary). Each line must be either\n"
+    "  Step N: apply rule: if <pred>, then <pred>\n"
+    "or, when ready,\n"
+    "  Answer: <pred> is derived.\n\n"
+)
+
+_RC_VALUE_HEADER = (
+    "Given the rules and current derivation, decide whether continuing "
+    "will reach the target. Reply with EXACTLY one of: sure / likely / "
+    "impossible. No other text.\n\n"
+)
+
+
+class RulechainAdapter(Adapter):
+    name = "rulechain"
+    max_depth = 12
+
+    def __init__(self, rec: dict) -> None:
+        super().__init__(rec)
+        self.prompt_text = rec.get("prompt") or rec.get("init_state_text") or ""
+        self.gold_answer_label = rec.get("answer_label", "")
+
+    def _common(self) -> str:
+        return f"{self.prompt_text}\n\n"
+
+    def propose_prompt(self, partial: str) -> str:
+        body = self._common()
+        n_so_far = len(re.findall(r"^Step\s+\d+:", partial, re.MULTILINE))
+        next_n = n_so_far + 1
+        body += ("Derivation so far:\n" + partial) if partial else \
+                "Derivation so far: (none)\n"
+        body += f"\nStep {next_n}:"
+        return _RC_PROPOSE_HEADER + body
+
+    def value_prompt(self, partial: str) -> str:
+        body = self._common()
+        body += "Partial derivation:\n" + (partial if partial else "(none)\n")
+        body += "\nEvaluation:"
+        return _RC_VALUE_HEADER + body
+
+    def extract_steps(self, gen: str, partial: str) -> list[str]:
+        out: list[str] = []
+        for ln in gen.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            ln = re.sub(r"^[\-\*\d\.]+\s*", "", ln)
+            if re.match(r"^Answer\s*:\s*", ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+                continue
+            if re.match(r"^Step\s+\d+:\s*apply\s+rule", ln, re.IGNORECASE):
+                out.append(ln.rstrip())
+        return out
+
+    def is_terminal(self, partial: str) -> bool:
+        return bool(re.search(r"^Answer\s*:", partial,
+                              re.IGNORECASE | re.MULTILINE))
+
+    def is_correct(self, partial: str) -> bool:
+        from src.score_ood import score_rulechain
+        ok, _ = score_rulechain(partial, self.rec)
+        return ok
+
+
 ADAPTERS = {"pq": ProntoQAAdapter, "bw": BlocksworldAdapter,
              "gc": GraphColorAdapter,
              "proofwriter": ProofWriterAdapter,
              "nqueens": NQueensAdapter,
-             "clutrr": CLUTRRAdapter}
+             "clutrr": CLUTRRAdapter,
+             "rulechain": RulechainAdapter}
 
 
 # ---------- Generic ToT BFS ----------
@@ -857,12 +925,17 @@ def main() -> None:
     ap.add_argument("--shard_rank", type=int, default=0)
     ap.add_argument("--shard_world", type=int, default=1)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--use_4bit", type=int, default=0,
+                    help="bnb 4-bit quantization (auto-skipped for gpt-oss "
+                         "which ships pre-quantized).")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Loading {args.model}", flush=True)
+    is_gpt_oss = "gpt-oss" in args.model.lower()
+    is_mistral3 = "mistral-small-3" in args.model.lower()
+    print(f"Loading {args.model} (4bit={bool(args.use_4bit)})", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -870,9 +943,34 @@ def main() -> None:
         tok.padding_side = "left"
     except Exception:
         pass
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, trust_remote_code=True,
-        device_map={"": device}).eval()
+    if is_mistral3:
+        from transformers.models.mistral3 import (
+            Mistral3ForConditionalGeneration,
+        )
+        loader = Mistral3ForConditionalGeneration
+    else:
+        loader = AutoModelForCausalLM
+    use_bnb = bool(args.use_4bit) and not is_gpt_oss
+    if use_bnb:
+        from transformers import BitsAndBytesConfig
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = loader.from_pretrained(
+            args.model, trust_remote_code=True, device_map="auto",
+            quantization_config=bnb_cfg,
+        ).eval()
+    elif is_gpt_oss:
+        model = loader.from_pretrained(
+            args.model, trust_remote_code=True, device_map="auto",
+        ).eval()
+    else:
+        model = loader.from_pretrained(
+            args.model, torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            device_map={"": device},
+        ).eval()
 
     records = [json.loads(l) for l in open(args.test_data)]
     if args.limit > 0:

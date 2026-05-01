@@ -161,12 +161,27 @@ def main():
     if rank == 0:
         print(f"Loading {base}", flush=True)
     is_gpt_oss = "gpt-oss" in base.lower()
+    use_4bit = bool(int(config["model"].get("use_4bit", 0))) and not is_gpt_oss
     if is_gpt_oss:
         # GPT-OSS-20B ships pre-quantized with mxfp4 — let HF auto-handle
         # dtype + placement via device_map="auto". Single-GPU only.
         model = AutoModelForCausalLM.from_pretrained(
             base, trust_remote_code=True, device_map="auto",
         )
+    elif use_4bit:
+        # QLoRA: 4-bit base, full-precision LoRA adapters.
+        from transformers import BitsAndBytesConfig
+        from peft import prepare_model_for_kbit_training
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            base, trust_remote_code=True, device_map={"": device},
+            quantization_config=bnb_cfg,
+        )
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             base, trust_remote_code=True, torch_dtype=torch.bfloat16,
